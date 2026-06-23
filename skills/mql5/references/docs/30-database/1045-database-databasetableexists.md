@@ -1,0 +1,36 @@
+# DatabaseTableExists
+
+Checks the presence of the table in a database.
+
+```
+bool  DatabaseTableExists(
+   int     database,      // database handle received in DatabaseOpen
+   string  table          // table name
+   );
+
+```
+
+Parameters
+
+database
+
+[in]  Database handle received in [DatabaseOpen()](/en/docs/database/databaseopen).
+
+table
+
+[in]  Table name.
+
+Return Value
+
+Return true if successful, otherwise false. To get the error code, use GetLastError(), the possible responses are:
+
+- ERR_INVALID_PARAMETER (4003)               –  no table name specified (empty string or NULL);
+- ERR_WRONG_STRING_PARAMETER (5040)  – error converting a request into a UTF-8 string;
+- ERR_DATABASE_INTERNAL (5120)              – internal database error;
+- ERR_DATABASE_INVALID_HANDLE (5121)   - invalid database handle;
+- ERR_DATABASE_EXECUTE (5124)               -  request execution error;
+- ERR_DATABASE_NO_MORE_DATA (5126)    - no table exists (not an error, normal completion).
+
+See also
+
+[DatabasePrepare](/en/docs/database/databaseprepare), [DatabaseFinalize](/en/docs/database/databasefinalize)

@@ -1,0 +1,17 @@
+# Linear Equations
+
+This section provides functions for solving systems of linear equations of the form A·X = B, where A is a square coefficient matrix, B is the right-hand side, and X is the solution matrix or vector. The methods support various data types (double, float, complex, complexf) and are based on LAPACK functions to ensure high precision and performance.
+
+The functions are categorized based on the type of the coefficient matrix A. Each function is overloaded to support both matrix and vector forms for the right-hand side (B) and the solution (X).
+
+| Function | Action |
+| --- | --- |
+| LinearEquationsSolution | Computes the solution to the system of linear equations with a square coefficient matrix A and multiple right-hand sides. A*X = B, where A is an n-by-n general matrix, the columns of matrix B are individual right-hand sides, and the columns of X are the corresponding solutions. LAPACK function  GESV . |
+| LinearEquationsSolutionTriangular | Computes the solution to the system of linear equations with a square triangular coefficient matrix A and multiple right-hand sides. A*X = B, where A is an n-by-n general matrix, the columns of matrix B are individual right-hand sides, and the columns of X are the corresponding solutions. LAPACK function  TRTRS . |
+| InverseTriangular | Computes the inverse of a upper or lower triangular matrix A. LAPACK function  TRTRI . |
+| CondNumReciprocalTriangular | Estimates the reciprocal of the condition number of a upper or lower triangular matrix A in either the one-norm or infinity-norm. LAPACK function  TRCON . |
+| LinearEquationsSolutionSy | Computes the solution to the system of linear equations with a symmetric or Hermitian conjugated matrix A and multiple right-hand sides. A*X = B, where A is an n-by-n symmetric or Hermitian conjugated matrix, the columns of matrix B are individual right-hand sides, and the columns of X are the corresponding solutions. LAPACK functions  SYSV ,  HESV . |
+| LinearEquationsSolutionComplexSy | Computes the solution to the system of linear equations with a complex symmetric (not Hermitian conjugated!) matrix A and multiple right-hand sides. A*X = B, where A is an n-by-n complex symmetric matrix, the columns of matrix B are individual right-hand sides, and the columns of X are the corresponding solutions. LAPACK function  SYSV . |
+| LinearEquationsSolutionSyPD | Computes the solution to the system of linear equations with a symmetric or Hermitian conjugated positive-definite matrix A and multiple right-hand sides. A*X = B, where A is an n-by-n symmetric or Hermitian conjugated positive-definite matrix, the columns of matrix B are individual right-hand sides, and the columns of X are the corresponding solutions. LAPACK function  POSV . |
+| LinearEquationsSolutionGeTrid | Computes the solution to the system of linear equations with a general (nonsymmetric) tridiagonal coefficient matrix A and multiple right-hand sides. A*X = B, where A is an n-by-n general tridiagonal matrix, the columns of matrix B are individual right-hand sides, and the columns of X are the corresponding solutions. LAPACK function  GTSV . |
+| LinearEquationsSolutionSyTridPD | Computes the solution to the system of linear equations with a symmetric tridiagonal positive-definite coefficient matrix A and multiple right-hand sides. A*X = B, where A is an n-by-n symmetric tridiagonal matrix, the columns of matrix B are individual right-hand sides, and the columns of X are the corresponding solutions. LAPACK function  PTSV . |

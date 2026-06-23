@@ -1,0 +1,16 @@
+# OnChange
+
+The virtual handler of the internal "Change" event.
+
+```
+virtual bool  OnChange()
+
+```
+
+Return Value
+
+true - event processed, otherwise - false.
+
+Note
+
+The base class method does nothing and always returns true.

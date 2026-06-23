@@ -1,0 +1,116 @@
+Sitemap: https://www.mql5.com/sitemap.xml
+Host: https://www.mql5.com
+
+User-agent: Mail.RU_Bot
+Disallow: /
+
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: ExaBot
+Disallow: /
+
+User-agent: CrazyWebCrawler-Spider
+Disallow: /
+
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: BLEXBot
+Disallow: /
+
+User-agent: Yandex
+Disallow: /*/search*
+Disallow: /data*
+Disallow: /return
+Disallow: /drawtext
+Disallow: /signals/charts/risks
+Disallow: /*/signals/*/deals/page*
+Disallow: /*/signals/*/pending-orders/page*
+Disallow: /*/signals/*/positions/page*
+Disallow: /*/signals/new
+Disallow: /*/signals/*/news?skip=
+Disallow: /*/signals/*/reviews
+Disallow: /*/users/*/publications
+Disallow: /*/users/*/achievements
+Disallow: /*/users/*/feedbacks
+Allow: /en/users/*/publications
+Disallow: /*/messages/*
+Disallow: /messages/avatar
+Disallow: /*/channels/*
+Disallow: /*/code/viewcode/*
+Disallow: /go*
+Disallow: /click*
+Disallow: /*/auth_set
+Disallow: /*/auth_forgotten
+Disallow: /*/auth_forgot_confirm
+Disallow: /*/publish/*
+Disallow: /*_escaped_fragment_
+Disallow: /*?print=
+Disallow: /p/
+Disallow: /captcha/
+Disallow: /*/accounting/buy/market/*
+Disallow: /*/code/download/*/
+Disallow: /*/hosting/rules
+Disallow: /maintenance.html
+Disallow: /*/market/product/*/comments
+Disallow: /*/market/product/*/updates
+Disallow: /*/charts/*
+Disallow: /*/quotes/charts/*
+Disallow: /*/quotes/*/chart
+Disallow: /en/quotes/*/chart
+Allow: /*/book/applications/charts/
+Allow: /*/quotes/widgets/chart
+
+Clean-Param: v
+Clean-Param: dir&orderby
+Clean-Param: ref&count&Sort&sort
+Clean-Param: utm_source&utm_medium&utm_campaign&utm_term&utm_content&utm_nooverride&utm_expid&gclid&_openstat&yclid&gsaid&source&ysclid&clickid&returnUrl&amp
+Clean-Param: added&block&pos&device&etext&from
+Clean-Param: filter&Filter
+
+User-agent: *
+Disallow: /*/search*
+Disallow: /data*
+Disallow: /return
+Disallow: /drawtext
+Disallow: /signals/charts/risks
+Disallow: /*/signals/*/deals/page*
+Disallow: /*/signals/*/pending-orders/page*
+Disallow: /*/signals/*/positions/page*
+Disallow: /*/signals/new
+Disallow: /*/signals/*/news?skip=
+Disallow: /*/signals/*/reviews
+Disallow: /*/users/*/publications
+Disallow: /*/users/*/achievements
+Disallow: /*/users/*/feedbacks
+Allow: /en/users/*/publications
+Disallow: /*/messages/*
+Disallow: /messages/avatar
+Disallow: /*/channels/*
+Disallow: /*/code/viewcode/*
+Disallow: /go*
+Disallow: /click*
+Disallow: /*/auth_set
+Disallow: /*/auth_forgotten
+Disallow: /*/auth_forgot_confirm
+Disallow: /*/publish/*
+Disallow: /*_escaped_fragment_
+Disallow: /*?print=
+Disallow: /p/
+Disallow: /captcha/
+Disallow: /*/accounting/buy/market/*
+Disallow: /*/code/download/*/
+Disallow: /*/hosting/rules
+Disallow: /maintenance.html
+Disallow: /*/market/product/*/comments
+Disallow: /*/market/product/*/updates
+Disallow: /*/charts/*
+Disallow: /*/quotes/charts/*
+Disallow: /*/quotes/*/chart
+Disallow: /en/quotes/*/chart
+Allow: /*/book/applications/charts/
+Allow: /*/quotes/widgets/chart

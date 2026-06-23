@@ -1,0 +1,226 @@
+# iSAR
+
+The function returns the handle of the Parabolic Stop and Reverse system indicator. It has only one buffer.
+
+```
+int  iSAR(
+   string           symbol,      // symbol name
+   ENUM_TIMEFRAMES  period,      // period
+   double           step,        // price increment step - acceleration factor
+   double           maximum      // maximum value of step
+   );
+
+```
+
+Parameters
+
+symbol
+
+[in] The symbol name of the security, the data of which should be used to calculate the indicator. The [NULL](/en/docs/basis/types/void) value means the current symbol.
+
+period
+
+[in] The value of the period can be one of the [ENUM_TIMEFRAMES](/en/docs/constants/chartconstants/enum_timeframes) values, 0 means the current timeframe.
+
+step
+
+[in]  The step of price increment, usually  0.02.
+
+maximum
+
+[in]  The maximum step, usually 0.2.
+
+Return Value
+
+Returns the handle of a specified technical indicator,  in case of failure returns [INVALID_HANDLE](/en/docs/constants/namedconstants/otherconstants). The computer memory can be freed from an indicator that is no more utilized, using the [IndicatorRelease()](/en/docs/series/indicatorrelease) function, to which the indicator handle is passed.
+
+Example:
+
+```
+//+------------------------------------------------------------------+
+//|                                                    Demo_iSAR.mq5 |
+//|                        Copyright 2011, MetaQuotes Software Corp. |
+//|                                              https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2000-2024, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property description "The indicator demonstrates how to obtain data"
+#property description "of indicator buffers for the iSAR technical indicator."
+#property description "A symbol and timeframe used for calculation of the indicator,"
+#property description "are set by the symbol and period parameters."
+#property description "The method of creation of the handle is set through the 'type' parameter (function type)."
+#property description "All the other parameters are similar to the standard Parabolic Stop and Reverse."
+ 
+#property indicator_chart_window
+#property indicator_buffers 1
+#property indicator_plots   1
+//--- drawing iSAR
+#property indicator_label1  "iSAR"
+#property indicator_type1   DRAW_ARROW
+#property indicator_color1  clrBlue
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  1
+//+------------------------------------------------------------------+
+//| Enumeration of the methods of handle creation                    |
+//+------------------------------------------------------------------+
+enum Creation
+  {
+   Call_iSAR,              // use iSAR
+   Call_IndicatorCreate    // use IndicatorCreate
+  };
+//--- input parameters
+input Creation             type=Call_iSAR;               // type of the function 
+input double               step=0.02;                    // step - the acceleration factor for trailing of stops
+input double               maximum=0.2;                  // maximum value of step
+input string               symbol=" ";                   // symbol 
+input ENUM_TIMEFRAMES      period=PERIOD_CURRENT;        // timeframe
+//--- indicator buffers
+double         iSARBuffer[];
+//--- variable for storing the handle of the iSAR indicator
+int    handle;
+//--- variable for storing
+string name=symbol;
+//--- name of the indicator on a chart
+string short_name;
+//--- we will keep the number of values in the Parabolic SAR indicator
+int    bars_calculated=0;
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+//--- assignment of array to indicator buffer
+   SetIndexBuffer(0,iSARBuffer,INDICATOR_DATA);
+//--- set a symbol code from the Wingdings charset for the PLOT_ARROW property for displaying on a chart
+   PlotIndexSetInteger(0,PLOT_ARROW,159);
+//--- determine the symbol the indicator is drawn for
+   name=symbol;
+//--- delete spaces to the right and to the left
+   StringTrimRight(name);
+   StringTrimLeft(name);
+//--- if it results in zero length of the 'name' string
+   if(StringLen(name)==0)
+     {
+      //--- take the symbol of the chart the indicator is attached to
+      name=_Symbol;
+     }
+//--- create handle of the indicator
+   if(type==Call_iSAR)
+      handle=iSAR(name,period,step,maximum);
+   else
+     {
+      //--- fill the structure with parameters of the indicator     
+      MqlParam pars[2];
+      //--- step value
+      pars[0].type=TYPE_DOUBLE;
+      pars[0].double_value=step;
+      //--- limit of the step value that can be used for calculations
+      pars[1].type=TYPE_DOUBLE;
+      pars[1].double_value=maximum;
+      handle=IndicatorCreate(name,period,IND_SAR,2,pars);
+     }
+//--- if the handle is not created
+   if(handle==INVALID_HANDLE)
+     {
+      //--- tell about the failure and output the error code
+      PrintFormat("Failed to create handle of the iSAR indicator for the symbol %s/%s, error code %d",
+                  name,
+                  EnumToString(period),
+                  GetLastError());
+      //--- the indicator is stopped early
+      return(INIT_FAILED);
+     }
+//--- show the symbol/timeframe the Parabolic SAR indicator is calculated for
+   short_name=StringFormat("iSAR(%s/%s, %G, %G)",name,EnumToString(period),
+                           step,maximum);
+   IndicatorSetString(INDICATOR_SHORTNAME,short_name);
+//--- normal initialization of the indicator
+   return(INIT_SUCCEEDED);
+  }
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+  {
+//--- number of values copied from the iSAR indicator
+   int values_to_copy;
+//--- determine the number of values calculated in the indicator
+   int calculated=BarsCalculated(handle);
+   if(calculated<=0)
+     {
+      PrintFormat("BarsCalculated() returned %d, error code %d",calculated,GetLastError());
+      return(0);
+     }
+//--- if it is the first start of calculation of the indicator or if the number of values in the iSAR indicator changed
+//---or if it is necessary to calculated the indicator for two or more bars (it means something has changed in the price history)
+   if(prev_calculated==0 || calculated!=bars_calculated || rates_total>prev_calculated+1)
+     {
+      //--- if the iSARBuffer array is greater than the number of values in the iSAR indicator for symbol/period, then we don't copy everything 
+      //--- otherwise, we copy less than the size of indicator buffers
+      if(calculated>rates_total) values_to_copy=rates_total;
+      else                       values_to_copy=calculated;
+     }
+   else
+     {
+      //--- it means that it's not the first time of the indicator calculation, and since the last call of OnCalculate()
+      //--- for calculation not more than one bar is added
+      values_to_copy=(rates_total-prev_calculated)+1;
+     }
+//--- fill the arrays with values of the iSAR indicator
+//--- if FillArrayFromBuffer returns false, it means the information is nor ready yet, quit operation
+   if(!FillArrayFromBuffer(iSARBuffer,handle,values_to_copy)) return(0);
+//--- form the message
+   string comm=StringFormat("%s ==>  Updated value in the indicator %s: %d",
+                            TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),
+                            short_name,
+                            values_to_copy);
+//--- display the service message on the chart
+   Comment(comm);
+//--- memorize the number of values in the Parabolic SAR indicator
+   bars_calculated=calculated;
+//--- return the prev_calculated value for the next call
+   return(rates_total);
+  }
+//+------------------------------------------------------------------+
+//| Filling indicator buffers from the iSAR indicator                |
+//+------------------------------------------------------------------+
+bool FillArrayFromBuffer(double &sar_buffer[],  // indicator buffer of Parabolic SAR values
+                         int ind_handle,        // handle of the iSAR indicator
+                         int amount             // number of copied values
+                         )
+  {
+//--- reset error code
+   ResetLastError();
+//--- fill a part of the iSARBuffer array with values from the indicator buffer that has 0 index
+   if(CopyBuffer(ind_handle,0,0,amount,sar_buffer)<0)
+     {
+      //--- if the copying fails, tell the error code
+      PrintFormat("Failed to copy data from the iSAR indicator, error code %d",GetLastError());
+      //--- quit with zero result - it means that the indicator is considered as not calculated
+      return(false);
+     }
+//--- everything is fine
+   return(true);
+  }
+//+------------------------------------------------------------------+
+//| Indicator deinitialization function                              |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   if(handle!=INVALID_HANDLE)
+      IndicatorRelease(handle);
+//--- clear the chart after deleting the indicator
+   Comment("");
+  }    
+
+```

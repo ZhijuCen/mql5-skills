@@ -1,0 +1,34 @@
+# CheckTrailingStopLong
+
+Checks Trailing Stop conditions of a long position.
+
+```
+virtual bool  CheckTrailingStopLong(
+   CPositionInfo*  position,     // pointer
+   double&         sl,           // reference
+   double&         tp            // reference
+   )
+
+```
+
+Parameters
+
+position
+
+[in]  Pointer to [CPositionInfo](/en/docs/standardlibrary/tradeclasses/cpositioninfo) object.
+
+sl
+
+[in][out]  Reference to variable for Stop Loss price.
+
+tp
+
+[in][out]  Reference to variable for Take Profit price.
+
+Return Value
+
+true - conditions are satisfied, otherwise - false.
+
+Note
+
+First it calculates the maximal allowed Stop Loss price closest to the current price and calculates Stop Loss price using the values of moving average indicator of the previous (completed) bar. If position already has Stop Loss price, its value is assumed as a base price, otherwise the base price is the open price of the position. If the calculated Stop Loss price is higher than base price and lower than maximal allowed Stop Loss price, it suggests to set new Stop Loss price.

@@ -1,0 +1,166 @@
+# SocketTlsRead
+
+Read data from secure TLS connection.
+
+```
+int  SocketTlsRead(
+   int           socket,               // socket
+   uchar&        buffer[],             // buffer for reading data from socket
+   uint          buffer_maxlen         // number of bytes to read
+   );
+
+```
+
+Parameters
+
+socket
+
+[in]  Socket handle returned by the [SocketCreate](/en/docs/network/socketcreate) function. When an incorrect handle is passed to [_LastError](/en/docs/predefined/_lasterror), the error 5270 (ERR_NETSOCKET_INVALIDHANDLE) is activated.
+
+buffer
+
+[out]  Reference to the [uchar](/en/docs/basis/types/integer/integertypes) type array the data is read in. Dynamic array size is increased by the number of read bytes. The array size cannot exceed [INT_MAX](/en/docs/constants/namedconstants/typeconstants) (2147483647).
+
+buffer_maxlen
+
+[in]  Number of bytes to read to the buffer[] array. Data not fitting into the array remain in the socket. They can be received by the next SocketTLSRead call. buffer_maxlen cannot exceed [INT_MAX](/en/docs/constants/namedconstants/typeconstants) (2147483647).
+
+Return Value
+
+If successful, return the number of read bytes. In case of an error, -1 is returned.
+
+Note
+
+If an error occurs on a system socket when executing the function, connection established via [SocketConnect](/en/docs/network/socketconnect) is discontinued.
+
+The function is executed till it receives the specified amount of data or the timeout is reached ([SocketTimeouts](/en/docs/network/sockettimeouts)).
+
+In case of a data reading error, the error 5273 (ERR_NETSOCKET_IO_ERROR) is written in [_LastError](/en/docs/predefined/_lasterror).
+
+The function can be called only from Expert Advisors and scripts, as they run in their own execution threads. If calling from an indicator, [GetLastError()](/en/docs/check/getlasterror) returns the error 4014 – "Function is not allowed for call".
+
+Example:
+
+```
+//+------------------------------------------------------------------+
+//|                                                SocketExample.mq5 |
+//|                        Copyright 2018, MetaQuotes Software Corp. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright   "Copyright 2000-2024, MetaQuotes Ltd."
+#property link        "https://www.mql5.com"
+#property version     "1.00"
+#property description "Add Address to the list of allowed ones in the terminal settings to let the example work"
+#property script_show_inputs
+ 
+input string Address="www.mql5.com";
+input int    Port   =80;
+bool         ExtTLS =false;
+//+------------------------------------------------------------------+
+//| Send command to the server                                       |
+//+------------------------------------------------------------------+
+bool HTTPSend(int socket,string request)
+  {
+   char req[];
+   int  len=StringToCharArray(request,req)-1;
+   if(len<0)
+      return(false);
+//--- if secure TLS connection is used via the port 443
+   if(ExtTLS)
+      return(SocketTlsSend(socket,req,len)==len);
+//--- if standard TCP connection is used
+   return(SocketSend(socket,req,len)==len);
+  }
+//+------------------------------------------------------------------+
+//| Read server response                                             |
+//+------------------------------------------------------------------+
+bool HTTPRecv(int socket,uint timeout)
+  {
+   char   rsp[];
+   string result;
+   uint   timeout_check=GetTickCount()+timeout;
+//--- read data from sockets till they are still present but not longer than timeout
+   do
+     {
+      uint len=SocketIsReadable(socket);
+      if(len)
+        {
+         int rsp_len;
+         //--- various reading commands depending on whether the connection is secure or not
+         if(ExtTLS)
+            rsp_len=SocketTlsRead(socket,rsp,len);
+         else
+            rsp_len=SocketRead(socket,rsp,len,timeout);
+         //--- analyze the response
+         if(rsp_len>0)
+           {
+            result+=CharArrayToString(rsp,0,rsp_len);
+            //--- print only the response header
+            int header_end=StringFind(result,"\r\n\r\n");
+            if(header_end>0)
+              {
+               Print("HTTP answer header received:");
+               Print(StringSubstr(result,0,header_end));
+               return(true);
+              }
+           }
+        }
+     }
+   while(GetTickCount()<timeout_check && !IsStopped());
+   return(false);
+  }
+//+------------------------------------------------------------------+
+//| Script program start function                                    |
+//+------------------------------------------------------------------+
+void OnStart()
+  {
+   int socket=SocketCreate();
+//--- check the handle
+   if(socket!=INVALID_HANDLE)
+     {
+      //--- connect if all is well
+      if(SocketConnect(socket,Address,Port,1000))
+        {
+         Print("Established connection to ",Address,":",Port);
+ 
+         string   subject,issuer,serial,thumbprint;
+         datetime expiration;
+         //--- if connection is secured by the certificate, display its data
+         if(SocketTlsCertificate(socket,subject,issuer,serial,thumbprint,expiration))
+           {
+            Print("TLS certificate:");
+            Print("   Owner:  ",subject);
+            Print("   Issuer:  ",issuer);
+            Print("   Number:     ",serial);
+            Print("   Print: ",thumbprint);
+            Print("   Expiration: ",expiration);
+            ExtTLS=true;
+           }
+         //--- send GET request to the server
+         if(HTTPSend(socket,"GET / HTTP/1.1\r\nHost: www.mql5.com\r\nUser-Agent: MT5\r\n\r\n"))
+           {
+            Print("GET request sent");
+            //--- read the response
+            if(!HTTPRecv(socket,1000))
+               Print("Failed to get a response, error ",GetLastError());
+           }
+         else
+            Print("Failed to send GET request, error ",GetLastError());
+        }
+      else
+        {
+         Print("Connection to ",Address,":",Port," failed, error ",GetLastError());
+        }
+      //--- close a socket after using
+      SocketClose(socket);
+     }
+   else
+      Print("Failed to create a socket, error ",GetLastError());
+  }
+//+------------------------------------------------------------------+
+
+```
+
+See also
+
+[SocketTimeouts](/en/docs/network/sockettimeouts), [MathSwap](/en/docs/math/mathswap)
