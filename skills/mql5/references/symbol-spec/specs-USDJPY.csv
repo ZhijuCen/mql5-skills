@@ -1,0 +1,39 @@
+Property,Value
+Sector,SECTOR_CURRENCY
+Industry,INDUSTRY_UNDEFINED
+Digits,3
+Contract size,100000
+Spread,3 (floating)
+Stops level,0
+Margin currency,USD
+Profit currency,JPY
+Calculation,Forex
+Tick size,0.00100000
+Tick value,0.618839
+Hedged margin,0.00
+Chart mode,By bid price
+Trade,Full access
+Execution,Market
+GTC mode,Good till cancelled
+Filling,Immediate or Cancel
+Expiration,All
+Orders,"Market, Limit, Stop, Stop Limit, Stop Loss, Take Profit"
+Minimal volume,0.01
+Maximal volume,80.00
+Volume step,0.01
+Swap type,In points
+Swap long,5.96
+Swap short,-16.95
+Swap rates Monday,1
+Swap rates Tuesday,1
+Swap rates Wednesday,3
+Swap rates Thursday,1
+Swap rates Friday,1
+Margin rates Market buy Initial,1.0000000
+Margin rates Market buy usd / lot,~0.00
+Margin rates Market buy Maintenance,1.0000000
+Margin rates Market buy usd / lot,~0.00
+Margin rates Market sell Initial,1.0000000
+Margin rates Market sell usd / lot,~0.00
+Margin rates Market sell Maintenance,1.0000000
+Margin rates Market sell usd / lot,~0.00

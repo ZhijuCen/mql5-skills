@@ -1,8 +1,9 @@
 [project]
 name = "mql5-skills"
 version = "0.1.0"
-description = "Add your description here"
+description = "MQL5 Agent Skill for MetaTrader 5 development — extraction pipeline and risk formula verification"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.14"
 dependencies = [
     "beautifulsoup4>=4.15.0",

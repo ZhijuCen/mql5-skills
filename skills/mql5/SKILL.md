@@ -276,33 +276,180 @@ SymbolInfoTick(_Symbol, tick);
 
 ## 5. Risk Management and Lot Sizing
 
-### Fixed Percentage Risk
+### Core Concept: PointValue
+
+`PointValue` = profit/loss in profit-currency for a 1-point price move on 1 lot.
+This is the foundation for all risk calculations.
 
 ```mql5
-double CalculateLotSize(double riskPercent, double slPoints) {
-    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-    double riskAmount = accountBalance * riskPercent / 100.0;
+double PointValue(string symbol) {
+    double point    = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    double contract = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+    ENUM_SYMBOL_CALC_MODE mode =
+        (ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE);
 
-    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-    double point     = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    switch (mode) {
+        case SYMBOL_CALC_MODE_FOREX:
+        case SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE:
+        case SYMBOL_CALC_MODE_CFD:
+        case SYMBOL_CALC_MODE_CFDINDEX:
+        case SYMBOL_CALC_MODE_CFDLEVERAGE:
+        case SYMBOL_CALC_MODE_EXCH_STOCKS:
+        case SYMBOL_CALC_MODE_EXCH_STOCKS_MOEX:
+            return point * contract;
 
-    if (tickValue == 0 || tickSize == 0 || slPoints == 0) return 0;
+        case SYMBOL_CALC_MODE_FUTURES:
+        case SYMBOL_CALC_MODE_EXCH_FUTURES:
+        case SYMBOL_CALC_MODE_EXCH_FUTURES_FORTS:
+            return point * SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE)
+                                / SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+    }
+    return 0;
+}
+```
 
-    double slMoneyPerLot = (slPoints * point / tickSize) * tickValue;
-    double lot = riskAmount / slMoneyPerLot;
+Key distinction:
+- `SYMBOL_TRADE_TICK_VALUE` = profit-currency per tick for **1 lot** (broker-supplied)
+- `PointValue` = profit-currency per **1 point** for **1 lot** (computed)
+- `loss = points × PointValue × Lots`
+
+### Direction A: SL Distance Points → SL Price
+
+Given a stop loss distance in points, compute the SL price level.
+
+```mql5
+double CalcSLFromPoints(string symbol, double openPrice, int slPoints,
+                        bool isBuy) {
+    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    double slDistPrice = slPoints * point;
+
+    if (isBuy)
+        return NormalizeDouble(openPrice - slDistPrice,
+                              (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS));
+    else
+        return NormalizeDouble(openPrice + slDistPrice,
+                              (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS));
+}
+```
+
+### Direction B: Risk % → SL Price (fixed lot size)
+
+Given account balance, risk %, and lot size, compute where SL must be placed.
+
+**CRITICAL**: When profit_currency ≠ account_currency, convert risk amount first.
+
+```mql5
+double CalcSLFromRisk(string symbol, double balance, double riskPct,
+                      double lots, double openPrice, bool isBuy) {
+    double pv = PointValue(symbol);
+    if (pv == 0 || lots == 0) return 0;
+
+    double riskAmount = balance * riskPct / 100.0;
+
+    // If profit currency differs from account currency, convert.
+    // Example: USDJPY → profit=JPY, account=USD → multiply by USDJPY bid
+    string profCy  = SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT);
+    string accCy   = SymbolInfoString(ACCOUNT_CURRENCY);
+    if (profCy != accCy) {
+        // Find exchange rate pair: look for a Forex symbol with
+        // base=accCy, profit=profCy (or reverse)
+        string rateSym = "";
+        int dir = FindFXRate(accCy, profCy, rateSym);
+        if (dir == 0) { Print("Cannot convert ", profCy, "→", accCy); return 0; }
+        MqlTick tick;
+        SymbolInfoTick(rateSym, tick);
+        double rate = (dir > 0) ? tick.bid : 1.0 / tick.ask;
+        riskAmount *= rate;  // risk in profit currency
+    }
+
+    double points  = riskAmount / (pv * lots);
+    double slPrice = points * SymbolInfoDouble(symbol, SYMBOL_POINT);
+
+    if (isBuy)
+        return NormalizeDouble(openPrice - slPrice,
+                              (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS));
+    else
+        return NormalizeDouble(openPrice + slPrice,
+                              (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS));
+}
+
+// Helper: find a Forex pair that converts from→to
+// Returns +1 if pair is from/to, -1 if to/from, 0 if not found
+int FindFXRate(string from, string to, string &result) {
+    for (int i = 0; i < SymbolsTotal(true); i++) {
+        string sym = SymbolName(i, true);
+        ENUM_SYMBOL_CALC_MODE m =
+            (ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(sym, SYMBOL_TRADE_CALC_MODE);
+        if (m != SYMBOL_CALC_MODE_FOREX &&
+            m != SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE) continue;
+        string base  = SymbolInfoString(sym, SYMBOL_CURRENCY_BASE);
+        string profit = SymbolInfoString(sym, SYMBOL_CURRENCY_PROFIT);
+        if (base == from && profit == to) { result = sym; return +1; }
+        if (base == to   && profit == from) { result = sym; return -1; }
+    }
+    return 0;
+}
+```
+
+### Direction C: SL Price → Lot Size (risk-based sizing)
+
+Given a fixed SL price, compute the lot size so loss matches the risk budget.
+
+```mql5
+double CalcLotsFromSL(string symbol, double balance, double riskPct,
+                      double openPrice, double slPrice) {
+    double pv = PointValue(symbol);
+    if (pv == 0) return 0;
+
+    double riskAmount = balance * riskPct / 100.0;
+
+    // Currency conversion (same as Direction B above)
+    string profCy = SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT);
+    string accCy  = SymbolInfoString(ACCOUNT_CURRENCY);
+    if (profCy != accCy) {
+        string rateSym = "";
+        int dir = FindFXRate(accCy, profCy, rateSym);
+        if (dir == 0) return 0;
+        MqlTick tick;
+        SymbolInfoTick(rateSym, tick);
+        double rate = (dir > 0) ? tick.bid : 1.0 / tick.ask;
+        riskAmount *= rate;
+    }
+
+    double slDistPrice = MathAbs(openPrice - slPrice);
+    if (slDistPrice == 0) return 0;
+
+    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    double points = slDistPrice / point;
+    double rawLots = riskAmount / (pv * points);
 
     // Normalize to broker constraints
-    double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-    double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    double minLot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+    double maxLot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
 
-    lot = MathFloor(lot / lotStep) * lotStep;
+    double lot = MathFloor(rawLots / lotStep) * lotStep;
     lot = MathMax(lot, minLot);
     lot = MathMin(lot, maxLot);
-
     return NormalizeDouble(lot, 2);
 }
+```
+
+### Profit Verification
+
+Use `OrderCalcProfit` (EA/scripts only) or manual formula to verify:
+
+```mql5
+// Using OrderCalcProfit
+double profit;
+OrderCalcProfit(ORDER_TYPE_BUY, symbol, lots, openPrice, closePrice, profit);
+// profit is in profit currency
+
+// Manual formula (Forex/CFD)
+double profit = (closePrice - openPrice) * ContractSize * Lots;
+
+// Manual formula (Futures)
+double profit = (closePrice - openPrice) * TickValue / TickSize * Lots;
 ```
 
 ### Risk-to-Reward Ratio
@@ -317,9 +464,13 @@ double tp = (orderType == ORDER_TYPE_BUY) ? price + tpDistance : price - tpDista
 ### Position Sizing Rules
 
 1. Never risk more than 1-2% per trade
-2. Calculate lot size from risk amount and SL distance
-3. Normalize to broker's lot step and min/max constraints
-4. Account for spread when calculating SL distance
+2. Calculate SL price from risk% and lot size (Direction B), OR
+   calculate lot size from SL price and risk% (Direction C)
+3. Always verify with `OrderCalcProfit` or manual formula
+4. Normalize SL with `NormalizeDouble(price, SYMBOL_DIGITS)`
+5. Check SL distance ≥ `SYMBOL_TRADE_STOPS_LEVEL × Point`
+6. Normalize lots to `SYMBOL_VOLUME_STEP`, clamp to `[VOLUME_MIN, VOLUME_MAX]`
+7. When profit_currency ≠ account_currency, convert risk amount via FX rate
 
 ## 6. Backtesting and Optimization
 
@@ -407,9 +558,11 @@ EA Development Cycle:
 
 ## 8. Common Pitfalls
 
+### General
+
 1. **Always check `ResultRetcode()`** after `PositionOpen()` — success != execution
 2. **Use `SetExpertMagicNumber()`** to distinguish your EA's trades
-3. **Normalize prices** with `SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)`
+3. **Normalize prices** with `NormalizeDouble(price, SYMBOL_DIGITS)`
 4. **Check `Bars() > N`** before trading to ensure enough history
 5. **Use `ArraySetAsSeries(true)`** for timeseries arrays (index 0 = latest)
 6. **Release indicator handles** in `OnDeinit()` with `IndicatorRelease()`
@@ -417,6 +570,15 @@ EA Development Cycle:
 8. **Account type matters**: Hedging requires iterating positions, Netting uses select
 9. **Spread varies**: use `SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)` for live spread
 10. **Timer in tester**: use `EventSetTimer()` in `OnInit()`, not hardcoded delays
+
+### SL/TP and Risk Calculation
+
+11. **PointValue ≠ TICK_VALUE**: `SYMBOL_TRADE_TICK_VALUE` is per tick (broker-defined step), `PointValue = point × ContractSize` is per point (smallest price unit). For most Forex: TickSize = Point, so they coincide; for futures/metals they may differ.
+12. **TickSize ≠ Point**: Always use the correct formula for the symbol's `SYMBOL_TRADE_CALC_MODE`. Forex/CFD: `loss = delta_price × ContractSize × Lots`. Futures: `loss = delta_price × TickValue / TickSize × Lots`.
+13. **Profit currency ≠ Account currency**: USDJPY profit is JPY, not USD. Risk amount must be converted: `risk_JPY = risk_USD × USDJPY_bid`. Failing this makes risk 100×+ too small.
+14. **NormalizeDouble introduces rounding**: SL price rounded to `SYMBOL_DIGITS` causes ~0.01-0.02% deviation from target loss. Acceptable; verify with `OrderCalcProfit`.
+15. **Lot step quantization**: `MathFloor(rawLots / lotStep) * lotStep` can leave residual risk unmet. For large lot_step or small risk budgets, actual loss may differ from target by up to one lot_step worth of loss.
+16. **STOPS_LEVEL check**: SL must be ≥ `SYMBOL_TRADE_STOPS_LEVEL × Point` from current price. If stops_level ≤ 0, use a safety margin (e.g. 150 points).
 
 ## 9. Quick Reference — EA Skeleton
 
@@ -439,6 +601,100 @@ input int    MagicNumber   = 12345;  // EA magic number
 CTrade trade;
 bool   IsHedging;
 datetime lastBarTime = 0;
+
+//+------------------------------------------------------------------+
+//| PointValue: profit-currency per 1-point move for 1 lot            |
+//+------------------------------------------------------------------+
+double PointValue(string symbol) {
+    double point    = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    double contract = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+    ENUM_SYMBOL_CALC_MODE mode =
+        (ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE);
+    if (mode == SYMBOL_CALC_MODE_FUTURES ||
+        mode == SYMBOL_CALC_MODE_EXCH_FUTURES ||
+        mode == SYMBOL_CALC_MODE_EXCH_FUTURES_FORTS)
+        return point * SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE)
+                            / SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+    return point * contract;  // Forex, CFD, Stocks
+}
+
+//+------------------------------------------------------------------+
+//| FindFXRate: locate a Forex pair for currency conversion            |
+//+------------------------------------------------------------------+
+int FindFXRate(string from, string to, string &result) {
+    for (int i = 0; i < SymbolsTotal(true); i++) {
+        string sym = SymbolName(i, true);
+        ENUM_SYMBOL_CALC_MODE m =
+            (ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(sym, SYMBOL_TRADE_CALC_MODE);
+        if (m != SYMBOL_CALC_MODE_FOREX &&
+            m != SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE) continue;
+        string base   = SymbolInfoString(sym, SYMBOL_CURRENCY_BASE);
+        string profit = SymbolInfoString(sym, SYMBOL_CURRENCY_PROFIT);
+        if (base == from && profit == to) { result = sym; return +1; }
+        if (base == to   && profit == from) { result = sym; return -1; }
+    }
+    return 0;
+}
+
+//+------------------------------------------------------------------+
+//| CalcSLFromRisk: risk% + lots → SL price                           |
+//+------------------------------------------------------------------+
+double CalcSLFromRisk(string symbol, double balance, double riskPct,
+                      double lots, double openPrice, bool isBuy) {
+    double pv = PointValue(symbol);
+    if (pv == 0 || lots == 0) return 0;
+    double riskAmount = balance * riskPct / 100.0;
+
+    // Currency conversion if needed
+    string profCy = SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT);
+    string accCy  = SymbolInfoString(ACCOUNT_CURRENCY);
+    if (profCy != accCy) {
+        string rateSym = "";
+        int dir = FindFXRate(accCy, profCy, rateSym);
+        if (dir == 0) return 0;
+        MqlTick tick; SymbolInfoTick(rateSym, tick);
+        riskAmount *= (dir > 0) ? tick.bid : 1.0 / tick.ask;
+    }
+
+    double points  = riskAmount / (pv * lots);
+    double slPrice = points * SymbolInfoDouble(symbol, SYMBOL_POINT);
+    int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+    return isBuy ? NormalizeDouble(openPrice - slPrice, digits)
+                 : NormalizeDouble(openPrice + slPrice, digits);
+}
+
+//+------------------------------------------------------------------+
+//| CalcLotsFromSL: SL price + risk% → lot size                       |
+//+------------------------------------------------------------------+
+double CalcLotsFromSL(string symbol, double balance, double riskPct,
+                      double openPrice, double slPrice) {
+    double pv = PointValue(symbol);
+    if (pv == 0) return 0;
+    double riskAmount = balance * riskPct / 100.0;
+
+    string profCy = SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT);
+    string accCy  = SymbolInfoString(ACCOUNT_CURRENCY);
+    if (profCy != accCy) {
+        string rateSym = "";
+        int dir = FindFXRate(accCy, profCy, rateSym);
+        if (dir == 0) return 0;
+        MqlTick tick; SymbolInfoTick(rateSym, tick);
+        riskAmount *= (dir > 0) ? tick.bid : 1.0 / tick.ask;
+    }
+
+    double slDist = MathAbs(openPrice - slPrice);
+    if (slDist == 0) return 0;
+    double points = slDist / SymbolInfoDouble(symbol, SYMBOL_POINT);
+    double rawLots = riskAmount / (pv * points);
+
+    double minLot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+    double maxLot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+    double lot = MathFloor(rawLots / lotStep) * lotStep;
+    lot = MathMax(lot, minLot);
+    lot = MathMin(lot, maxLot);
+    return NormalizeDouble(lot, 2);
+}
 
 //+------------------------------------------------------------------+
 int OnInit() {
@@ -465,13 +721,28 @@ void OnTick() {
     if (barTime == lastBarTime) return;
     lastBarTime = barTime;
 
-    // Analysis and trading logic here
-    // ...
+    // Example: buy with 1% risk, SL at 500 points
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    int slPts = 500;
+    double sl = CalcSLFromPoints(_Symbol, bid, slPts, true);
+    // Or: double sl = CalcSLFromRisk(_Symbol,
+    //         AccountInfoDouble(ACCOUNT_BALANCE), RiskPercent,
+    //         0.10, bid, true);
+
+    double lots = CalcLotsFromSL(_Symbol,
+        AccountInfoDouble(ACCOUNT_BALANCE), RiskPercent, bid, sl);
+
+    // Verify loss matches risk budget
+    double profit;
+    OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, lots, bid, sl, profit);
+    PrintFormat("SL=%.5f lots=%.2f expected_loss=%.2f",
+                sl, lots, profit);
+
+    // trade.Buy(lots, _Symbol, 0, sl, 0, "EA Signal");
 }
 
 //+------------------------------------------------------------------+
 double OnTester() {
-    // Custom optimization criterion
     double trades = TesterStatistics(STAT_TRADES);
     if (trades < 30) return 0;
     return TesterStatistics(STAT_PROFIT_FACTOR);
@@ -497,6 +768,11 @@ double OnTester() {
   - `24-customind/` — Custom indicator creation
   - `13-event-handlers/` — Event handlers (OnTick, OnTester, etc.)
   - `34-standardlibrary/` — Standard library (CTrade, CPositionInfo, etc.)
+  - `01-constants/` — Enums and structures (MqlTradeRequest, ENUM_SYMBOL_CALC_MODE)
+- `references/symbol-spec/` — Symbol specification CSVs (broker-specific)
+  - `specs-XAUUSD.csv` — XAUUSD: CFD Leverage, ContractSize=100, Digits=2
+  - `specs-USDJPY.csv` — USDJPY: Forex, ContractSize=100000, Digits=3
+- `scripts/verify_sl_tp_formulas.py` — Python verification of SL/TP risk formulas
 
 ### External
 

@@ -1,6 +1,7 @@
 
 .venv/
 __pycache__/
+*.pyc
 *.log
 .extract.log
 html_cache/

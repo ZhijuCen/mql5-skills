@@ -1,0 +1,39 @@
+Property,Value
+Sector,SECTOR_COMMODITIES
+Industry,INDUSTRY_COMMODITIES_PRECIOUS
+Digits,2
+Contract size,100
+Spread,12 (floating)
+Stops level,0
+Margin currency,USD
+Profit currency,USD
+Calculation,CFD Leverage
+Tick size,0.01000000
+Tick value,1.000000
+Hedged margin,25.00
+Chart mode,By bid price
+Trade,Full access
+Execution,Market
+GTC mode,Good till cancelled
+Filling,Immediate or Cancel
+Expiration,All
+Orders,"Market, Limit, Stop, Stop Limit, Stop Loss, Take Profit"
+Minimal volume,0.01
+Maximal volume,80.00
+Volume step,0.01
+Swap type,In points
+Swap long,-63.88
+Swap short,40.23
+Swap rates Monday,1
+Swap rates Tuesday,1
+Swap rates Wednesday,3
+Swap rates Thursday,1
+Swap rates Friday,1
+Margin rates Market buy Initial,1.0000000
+Margin rates Market buy usd / lot,~0.00
+Margin rates Market buy Maintenance,1.0000000
+Margin rates Market buy usd / lot,~0.00
+Margin rates Market sell Initial,1.0000000
+Margin rates Market sell usd / lot,~0.00
+Margin rates Market sell Maintenance,1.0000000
+Margin rates Market sell usd / lot,~0.00

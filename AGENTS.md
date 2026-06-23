@@ -15,6 +15,7 @@ MQL5 Agent Skills project. Creates and publishes Agent Skills conforming to the
 ```
 mql5-skills/
 ├── AGENTS.md              # This file — project conventions
+├── LICENSE                # MIT license
 ├── README.md              # Public readme
 ├── pyproject.toml         # uv project config
 ├── sitemaps/              # Source sitemaps from mql5.com
@@ -28,6 +29,8 @@ mql5-skills/
 ├── skills/
 │   └── mql5/              # The MQL5 development skill
 │       ├── SKILL.md       # Skill definition (agentskills.io spec)
+│       ├── scripts/
+│       │   └── verify_sl_tp_formulas.py  # SL/TP risk formula verification
 │       └── references/
 │           ├── book/      # Programming book markdown (from sitemap_book_en.xml)
 │           │   ├── 0000-book.md
@@ -35,16 +38,20 @@ mql5-skills/
 │           │   │   ├── 0001-intro.md
 │           │   │   └── pics/
 │           │   └── ...
-│           └── docs/      # API reference markdown (from sitemap_docs_en.xml)
-│               ├── 0000-docs.md
-│               ├── 01-basis/
-│               │   ├── 0001-basis.md
-│               │   └── pics/
-│               └── ...
+│           ├── docs/      # API reference markdown (from sitemap_docs_en.xml)
+│           │   ├── 0000-docs.md
+│           │   ├── 01-basis/
+│           │   │   ├── 0001-basis.md
+│           │   │   └── pics/
+│           │   └── ...
+│           └── symbol-spec/  # Broker symbol specifications (CSV)
+│               ├── specs-XAUUSD.csv
+│               └── specs-USDJPY.csv
 └── docs-dev/              # Development documentation
     ├── extraction.md      # Extraction workflow and script design
     ├── naming.md          # Folder/file naming conventions
-    └── skill-design.md    # SKILL.md content plan
+    ├── skill-design.md    # SKILL.md content plan
+    └── symbol-spec.md     # Symbol spec workflow
 ```
 
 ## SKILL.md Convention (skills/mql5/)
