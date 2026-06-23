@@ -349,7 +349,7 @@ double CalcSLFromRisk(string symbol, double balance, double riskPct,
     // If profit currency differs from account currency, convert.
     // Example: USDJPY → profit=JPY, account=USD → multiply by USDJPY bid
     string profCy  = SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT);
-    string accCy   = SymbolInfoString(ACCOUNT_CURRENCY);
+    string accCy   = AccountInfoString(ACCOUNT_CURRENCY);
     if (profCy != accCy) {
         // Find exchange rate pair: look for a Forex symbol with
         // base=accCy, profit=profCy (or reverse)
@@ -405,7 +405,7 @@ double CalcLotsFromSL(string symbol, double balance, double riskPct,
 
     // Currency conversion (same as Direction B above)
     string profCy = SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT);
-    string accCy  = SymbolInfoString(ACCOUNT_CURRENCY);
+    string accCy  = AccountInfoString(ACCOUNT_CURRENCY);
     if (profCy != accCy) {
         string rateSym = "";
         int dir = FindFXRate(accCy, profCy, rateSym);
@@ -647,7 +647,7 @@ double CalcSLFromRisk(string symbol, double balance, double riskPct,
 
     // Currency conversion if needed
     string profCy = SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT);
-    string accCy  = SymbolInfoString(ACCOUNT_CURRENCY);
+    string accCy  = AccountInfoString(ACCOUNT_CURRENCY);
     if (profCy != accCy) {
         string rateSym = "";
         int dir = FindFXRate(accCy, profCy, rateSym);
@@ -673,7 +673,7 @@ double CalcLotsFromSL(string symbol, double balance, double riskPct,
     double riskAmount = balance * riskPct / 100.0;
 
     string profCy = SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT);
-    string accCy  = SymbolInfoString(ACCOUNT_CURRENCY);
+    string accCy  = AccountInfoString(ACCOUNT_CURRENCY);
     if (profCy != accCy) {
         string rateSym = "";
         int dir = FindFXRate(accCy, profCy, rateSym);
