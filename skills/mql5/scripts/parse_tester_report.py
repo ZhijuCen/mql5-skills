@@ -569,13 +569,14 @@ def analyze_report(report: Report) -> dict:
     if not trades:
         return {"error": "No trades found", "trades": []}
 
-    # Parse backtest end date from period string (e.g. "2024.01.01 - 2025.06.22")
+    # Parse backtest end date from period string (e.g. "H4 (2024.01.01 - 2025.06.22)")
     bt_end = None
     period = report.settings.period
-    if " - " in period:
+    m = re.search(r"(\d{4}\.\d{2}\.\d{2})\s*\)\s*$", period)
+    if m:
         try:
-            bt_end = datetime.strptime(period.split(" - ")[1].strip(), "%Y.%m.%d")
-        except (ValueError, IndexError):
+            bt_end = datetime.strptime(m.group(1), "%Y.%m.%d")
+        except ValueError:
             pass
 
     # Per-trade risk check
