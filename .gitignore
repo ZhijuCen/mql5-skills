@@ -5,3 +5,10 @@ __pycache__/
 *.log
 .extract.log
 html_cache/
+
+ReportTester*.*
+!ReportTester-600xxxxx.html
+!ReportTester-600xxxxx.png
+!ReportTester-600xxxxx-holding.png
+!ReportTester-600xxxxx-hst.png
+!ReportTester-600xxxxx-mfemae.png
