@@ -99,6 +99,12 @@ Multiple MT5 instances can run simultaneously for different accounts:
 - **Deal**: executed exchange (buy at Ask, sell at Bid)
 - **Position**: current obligation (long or short)
 
+**How to look up any trading function**: Full API docs are in
+`references/docs/19-trading/` (34 files). Filename pattern:
+`0801-trading-ordercalcprofit.md`. Each file contains parameters, return
+values, and usage notes. For functions not listed below, read the
+corresponding doc file.
+
 ### CTrade Class (Standard Library)
 
 ```mql5
@@ -191,7 +197,17 @@ int handle = iMACD(_Symbol, PERIOD_H1, 12, 26, 9, PRICE_CLOSE);
 
 // Bollinger Bands
 int handle = iBands(_Symbol, PERIOD_H1, 20, 0, 2.0, PRICE_CLOSE);
+
+// ADX (trend strength)
+int handle = iADX(_Symbol, PERIOD_H4, 14);
 ```
+
+**How to look up any indicator**: Full API docs are in
+`references/docs/26-indicators/` (41 files). Filename pattern:
+`0969-indicators-i<name>.md` (e.g. `iadx`, `iatr`, `ifractals`).
+Each file contains: function signature, parameters, return value,
+buffer indices, and usage examples. For indicators not listed in §3,
+read the corresponding doc file rather than guessing the API.
 
 ### Reading Indicator Values
 
@@ -466,10 +482,15 @@ double tp = (orderType == ORDER_TYPE_BUY) ? price + tpDistance : price - tpDista
 1. Never risk more than 1-2% per trade
 2. Calculate SL price from risk% and lot size (Direction B), OR
    calculate lot size from SL price and risk% (Direction C)
-3. Always verify with `OrderCalcProfit` or manual formula
+3. **Always verify with `OrderCalcProfit`** — compute actual loss for the
+   lot you're about to open and confirm it doesn't exceed risk budget
 4. Normalize SL with `NormalizeDouble(price, SYMBOL_DIGITS)`
 5. Check SL distance ≥ `SYMBOL_TRADE_STOPS_LEVEL × Point`
-6. Normalize lots to `SYMBOL_VOLUME_STEP`, clamp to `[VOLUME_MIN, VOLUME_MAX]`
+6. Normalize lots to `SYMBOL_VOLUME_STEP`, clamp to `[VOLUME_MIN, VOLUME_MAX]`.
+   If `rawLots < minLot`, the clamp inflates risk — skip the trade
+   instead. Always verify with `OrderCalcProfit` before opening: compute
+   actual loss for `minLot` and confirm it doesn't exceed risk budget × 1.5.
+   If it does, skip the trade
 7. When profit_currency ≠ account_currency, convert risk amount via FX rate
 
 ## 6. Backtesting and Optimization
@@ -698,6 +719,62 @@ In the Deals table, check `Commission` and `Swap` columns:
 - Commission should be consistent per deal (proportional to volume)
 - Swap accumulates on overnight positions — can turn winners into losers
 - `Profit = Price P&L + Commission + Swap` — verify this sums correctly
+
+#### 11. Market Regime Filtering
+
+Trend-following strategies (including order-block / price-structure)
+degrade in choppy or sideways markets — order blocks get repeatedly
+broken, producing false signals and consecutive losses. Two simple
+filters can help:
+
+**ADX Trend Strength Filter**: Only trade when ADX(14) on a higher
+timeframe (e.g. H4) exceeds a threshold (commonly 25). ADX below the
+threshold means no clear trend — the strategy's edge weakens.
+
+```mql5
+// In entry logic, before trend check:
+double adx[];
+ArraySetAsSeries(adx, true);
+if (CopyBuffer(g_h4adx, 0, 0, 1, adx) == 1) {
+    if (adx[0] < InpADX_Threshold) {  // e.g. 25.0
+        Print("ADX ", adx[0], " < threshold, skipping");
+        return;
+    }
+}
+```
+
+**Time-Based Filter**: Certain hours produce noise signals (session
+transitions, low liquidity). Identify the worst-performing hours from
+monthly breakdowns and skip them:
+
+```mql5
+MqlDateTime dt;
+TimeCurrent(dt);
+// Parse InpBadHours = "4,16,18" and skip if match
+```
+
+#### 12. Deal-Level Debugging Methodology
+
+When summary metrics reveal problems, drill into individual trades.
+Use `scripts/parse_tester_report.py --analyze` for automated analysis
+(pairs deals, computes risk per trade, monthly breakdown, re-entry
+detection, streak analysis). For raw data, use `--json` instead.
+
+1. **Pair deals**: Iterate deals, pair each `direction=in` with the next
+   `direction=out` to form a complete trade (entry price, exit price, P&L,
+   close reason from comment).
+2. **Risk check**: For each trade, compute `|net_loss| / deposit × 100` to
+   verify risk % is within budget. Flag any trade exceeding 2× target risk.
+3. **SL distance analysis**: For SL hits, compute `|entry - exit| / point`
+   to get SL distance in points. Check if the EA is entering with SL too
+   close (oversized lots) or too far (oversized risk).
+4. **Re-entry detection**: Sort trades by entry time. If an SL hit is
+   immediately followed by a trade at similar entry price with larger lot,
+   the EA is doing implicit martingale on the same setup.
+5. **Volume pattern**: Plot lot sizes across trades. Consistent 0.01 lots
+   regardless of SL distance = minLot clamp bug.
+6. **Monthly breakdown**: Group trades by month, compute win rate and net P&L
+   per month. Identify worst months and correlate with market conditions.
 
 ## 7. Event Handlers Reference
 

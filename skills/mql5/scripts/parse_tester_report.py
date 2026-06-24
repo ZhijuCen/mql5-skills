@@ -518,12 +518,158 @@ def print_report(r: Report) -> None:
             print(f"  ... ({len(r.deals) - 10} more)")
 
 
+
+# ── Trade Analysis ───────────────────────────────────────────────────
+
+def pair_trades(deals: list) -> list:
+    """Pair entry/exit deals into complete trades."""
+    trading = [d for d in deals if d.type != "balance"]
+
+    trades = []
+    i = 0
+    while i < len(trading):
+        if trading[i].direction == "in":
+            entry = trading[i]
+            if i + 1 < len(trading) and trading[i + 1].direction == "out":
+                exit_d = trading[i + 1]
+                net = (exit_d.profit + entry.commission + exit_d.commission
+                       + entry.swap + exit_d.swap)
+                sl_dist = 0.0
+                if "sl" in exit_d.comment:
+                    sl_dist = abs(entry.price - exit_d.price)
+                trades.append({
+                    "open_time": entry.time,
+                    "close_time": exit_d.time,
+                    "type": entry.type,
+                    "volume": entry.volume,
+                    "entry": entry.price,
+                    "exit": exit_d.price,
+                    "profit": exit_d.profit,
+                    "commission": entry.commission + exit_d.commission,
+                    "swap": entry.swap + exit_d.swap,
+                    "net": net,
+                    "comment": exit_d.comment,
+                    "sl_distance": sl_dist,
+                })
+                i += 2
+            else:
+                i += 1
+        else:
+            i += 1
+    return trades
+
+
+def analyze_report(report: Report) -> dict:
+    """Run full trade analysis on parsed report."""
+    from datetime import datetime
+
+    deposit = report.settings.initial_deposit
+    trades = pair_trades(report.deals)
+
+    if not trades:
+        return {"error": "No trades found", "trades": []}
+
+    # Per-trade risk check
+    for t in trades:
+        t["risk_pct"] = abs(t["net"]) / deposit * 100 if deposit > 0 else 0
+
+    # SL hit vs TP hit
+    sl_trades = [t for t in trades if "sl " in t["comment"]]
+    tp_trades = [t for t in trades if "tp " in t["comment"]]
+    other = [t for t in trades if t not in sl_trades and t not in tp_trades]
+
+    avg_win = (sum(t["net"] for t in tp_trades) / len(tp_trades)) if tp_trades else 0
+    avg_loss = (sum(t["net"] for t in sl_trades) / len(sl_trades)) if sl_trades else 0
+    win_loss_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+    breakeven_wr = (abs(avg_loss) / (avg_win + abs(avg_loss))
+                    if (avg_win + abs(avg_loss)) > 0 else 0)
+
+    # Consecutive loss analysis
+    streaks = []
+    streak = 0
+    for t in trades:
+        if t["net"] <= 0:
+            streak += 1
+        else:
+            if streak > 0:
+                streaks.append(streak)
+            streak = 0
+    if streak > 0:
+        streaks.append(streak)
+
+    # Re-entry detection: SL hit followed by same direction with larger lot
+    reentries = []
+    for i in range(len(trades) - 1):
+        t1, t2 = trades[i], trades[i + 1]
+        if "sl " in t1["comment"] and t1["type"] == t2["type"]:
+            if t2["volume"] > t1["volume"]:
+                reentries.append({
+                    "after_trade": i + 1,
+                    "time": t2["open_time"],
+                    "type": t2["type"],
+                    "prev_lot": t1["volume"],
+                    "new_lot": t2["volume"],
+                    "multiplier": round(t2["volume"] / t1["volume"], 1),
+                })
+
+    # Monthly breakdown
+    monthly = {}
+    for t in trades:
+        month = t["open_time"][:7]
+        if month not in monthly:
+            monthly[month] = {"count": 0, "net": 0.0, "wins": 0, "losses": 0}
+        monthly[month]["count"] += 1
+        monthly[month]["net"] += t["net"]
+        if t["net"] > 0:
+            monthly[month]["wins"] += 1
+        else:
+            monthly[month]["losses"] += 1
+
+    for m in monthly:
+        d = monthly[m]
+        d["net"] = round(d["net"], 2)
+        d["win_rate"] = round(d["wins"] / d["count"] * 100, 1) if d["count"] else 0
+
+    # Volume pattern
+    lots = [t["volume"] for t in trades]
+    unique_lots = sorted(set(lots))
+
+    # Last trade gap relative to script execution time
+    last_close = trades[-1]["close_time"]
+    try:
+        last_dt = datetime.strptime(last_close, "%Y.%m.%d %H:%M:%S")
+        gap_days = (datetime.now() - last_dt).days
+    except Exception:
+        gap_days = -1
+
+    return {
+        "sl_hits": len(sl_trades),
+        "tp_hits": len(tp_trades),
+        "other_exits": len(other),
+        "win_loss_ratio": round(win_loss_ratio, 2),
+        "breakeven_win_rate": round(breakeven_wr * 100, 1),
+        "win_rate_gap_pct": round((len(tp_trades) / len(trades) - breakeven_wr) * 100, 1),
+        "consec_loss_streaks": streaks,
+        "reentries": reentries,
+        "monthly": monthly,
+        "lot_pattern": {
+            "unique_lots": unique_lots,
+            "uniform": len(unique_lots) == 1,
+        },
+        "last_trade_close": last_close,
+        "gap_days_to_now": gap_days,
+        "trades": trades,
+    }
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Parse MT5 Strategy Tester HTML report")
     parser.add_argument("report", help="Path to HTML report file")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--analyze", action="store_true",
+                        help="Run trade analysis (pair deals, risk check, monthly breakdown)")
     args = parser.parse_args()
 
     path = Path(args.report)
@@ -533,7 +679,11 @@ def main():
 
     report = parse_report(path)
 
-    if args.json:
+    if args.analyze:
+        report_dict = asdict(report)
+        report_dict["analyze"] = analyze_report(report)
+        print(json.dumps(report_dict, indent=2, ensure_ascii=False))
+    elif args.json:
         print(json.dumps(asdict(report), indent=2, ensure_ascii=False))
     else:
         print_report(report)
