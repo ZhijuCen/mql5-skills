@@ -482,6 +482,28 @@ The Strategy Tester is built into MT5. Key concepts:
 2. **Optimization**: genetic algorithm searches parameter space
 3. **Custom Criterion**: `OnTester()` returns optimization value
 
+**Important**: The Strategy Tester is GUI-only. `metatester64.exe` only manages
+remote testing agents (install/start/stop), not test execution itself.
+`terminal64.exe` has no command-line parameters. Backtesting and optimization
+must be performed through the MT5 Strategy Tester GUI.
+
+### CLI Automation — What Can and Cannot Be Automated
+
+| Task | CLI Possible? | How |
+|------|:---:|-----|
+| Syntax check | ✅ | `wine MetaEditor64.exe /compile:"path" /log /s` |
+| Compile .mq5 → .ex5 | ✅ | `wine MetaEditor64.exe /compile:"path" /log` |
+| Run backtest | ❌ | GUI only: Strategy Tester |
+| Run optimization | ❌ | GUI only: Strategy Tester |
+| Parse test report | ✅ | `scripts/parse_tester_report.py` |
+
+MetaEditor CLI syntax (Linux/Wine, from MT5 base directory):
+```
+wine MetaEditor64.exe /compile:"MQL5/Experts/MyEA.mq5" /log       # compile
+wine MetaEditor64.exe /compile:"MQL5/Experts/MyEA.mq5" /log /s    # syntax check only
+```
+Log file: same directory as source, same name with `.log` extension.
+
 ### OnTester Handler
 
 ```mql5
@@ -517,28 +539,47 @@ double OnTester() {
 | `STAT_EXPECTED_PAYOFF` | Average profit per trade |
 | `STAT_RECOVERY_FACTOR` | Profit / max drawdown |
 
+### Parameter Optimization
+
+When running optimization in the GUI, define parameter ranges as
+`[start, stop, step]` (stop inclusive). For example:
+
+| Parameter | Start | Stop | Step |
+|-----------|-------|------|------|
+| RiskPercent | 0.5 | 3.0 | 0.5 |
+| Slippage | 5 | 20 | 5 |
+| MagicNumber | 10000 | 10010 | 1 |
+
+In MT5 Strategy Tester: set each `input` parameter to "Enable optimization",
+then configure range/step in the optimization tab.
+
 ### Backtesting Workflow
 
 1. Code the EA with `OnTick()`, `OnInit()`, `OnDeinit()`
 2. Add `OnTester()` for custom optimization criterion
-3. In MT5: Strategy Tester → select EA → set symbol/timeframe/period
-4. Choose "Open prices only" for speed, "Every tick" for accuracy
-5. Run single test → check results
-6. Run optimization → find best parameters
-7. Validate with out-of-sample data
+3. **Compile and check syntax** via CLI (see CLI Automation above)
+4. In MT5: Strategy Tester → select EA → set symbol/timeframe/period
+5. Choose "Open prices only" for speed, "Every tick" for accuracy
+6. Run single test → check results
+7. Run optimization → find best parameters
+8. Validate with out-of-sample data
 
-### Automated Backtesting Loop
+### EA Development Cycle
 
 ```
-EA Development Cycle:
-  Code → Compile → Single Test → Check Results
-       ↓
-  If promising → Optimize → Analyze Results
-       ↓
-  If validated → Forward Test → Deploy
-       ↓
-  Monitor → Collect Data → Refine → Repeat
+Code → Syntax Check (CLI) → Compile (CLI)
+  ↓
+GUI: Single Test → Check Results
+  ↓
+If promising → GUI: Optimize → Analyze Report
+  ↓
+If validated → GUI: Forward Test → Deploy
+  ↓
+Monitor → Collect Data → Refine → Repeat
 ```
+
+Note: steps marked (CLI) can be automated via `mql5_helper.py` or direct
+Wine commands. GUI steps require human interaction.
 
 ### Report Analysis — Interpreting Tester Results
 

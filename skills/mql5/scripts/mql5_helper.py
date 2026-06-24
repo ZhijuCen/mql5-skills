@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-MQL5 development helper: compile, deploy, and manage EA/Indicator files.
+MQL5 development helper: compile, check, deploy, and list EA/Indicator files.
+
+CLI-automatable tasks only. Backtesting and optimization are GUI-only
+(Strategy Tester).
 
 Usage:
     python skills/mql5/scripts/mql5_helper.py compile FILE.mq5
+    python skills/mql5/scripts/mql5_helper.py check FILE.mq5
     python skills/mql5/scripts/mql5_helper.py deploy FILE.mq5
     python skills/mql5/scripts/mql5_helper.py status
     python skills/mql5/scripts/mql5_helper.py list
 """
 
 import argparse
-import os
 import shutil
 import subprocess
 import sys
@@ -31,9 +34,8 @@ TYPE_DIRS = {
 
 
 def detect_type(file_path: Path) -> str:
-    """Detect program type from file path or content."""
-    parts = file_path.parts
-    for p in parts:
+    """Detect program type from file path segments (path-only, no content read)."""
+    for p in file_path.parts:
         pl = p.lower()
         if pl in ("experts", "advisor", "advisors"):
             return "expert"
@@ -45,83 +47,130 @@ def detect_type(file_path: Path) -> str:
             return "service"
         if pl in ("include",):
             return "include"
-
-    # Detect from content
-    try:
-        content = file_path.read_text(errors="ignore")[:2000]
-        if "OnTick()" in content or "OnTester()" in content:
-            return "expert"
-        if "OnCalculate(" in content:
-            return "indicator"
-        if "OnStart()" in content:
-            return "script"
-    except Exception:
-        pass
-
     return "expert"  # default
 
 
-def get_dest_dir(program_type: str) -> Path:
-    """Get destination directory for a program type."""
-    subdir = TYPE_DIRS.get(program_type, "Experts")
-    return MQL5_DIR / subdir
+def _find_editor() -> Path | None:
+    """Locate MetaEditor64.exe / MetaEditor.exe in MT5 installation."""
+    candidates = [
+        MT5_BASE / "MetaEditor64.exe",
+        MT5_BASE / "MetaEditor.exe",
+    ]
+    for p in MT5_BASE.rglob("MetaEditor*.exe"):
+        candidates.append(p)
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
 
 
 def cmd_compile(args):
-    """Compile an MQ5 file using MetaEditor via Wine."""
+    """Compile an MQ5 file using MetaEditor via Wine.
+
+    Deploys the file to the MQL5 directory first, then compiles.
+    Generates a .log file alongside the source.
+    """
     src = Path(args.file).resolve()
     if not src.exists():
         print(f"Error: {src} not found")
         return 1
 
-    # Find metaeditor
-    candidates = [
-        MT5_BASE / "metaeditor64.exe",
-        MT5_BASE / "metaeditor.exe",
-    ]
-    # Also check common alternative locations
-    for p in MT5_BASE.rglob("metaeditor*.exe"):
-        candidates.append(p)
-
-    editor = None
-    for c in candidates:
-        if c.exists():
-            editor = c
-            break
-
+    editor = _find_editor()
     if not editor:
-        print("Error: metaeditor.exe not found in MT5 installation")
+        print("Error: MetaEditor.exe not found in MT5 installation")
         print(f"Searched: {MT5_BASE}")
-        print("Compilation must be done manually in MetaEditor IDE.")
         return 1
 
-    # Deploy first, then compile
+    # Deploy to MQL5 tree
     program_type = detect_type(src)
-    dest_dir = get_dest_dir(program_type)
+    dest_dir = MQL5_DIR / TYPE_DIRS.get(program_type, "Experts")
     dest = dest_dir / src.name
-
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
     print(f"Deployed: {src.name} → {dest}")
 
-    # Compile via Wine
+    # Compile: /compile:"path" /log
+    rel = dest.relative_to(MT5_BASE)
     try:
         result = subprocess.run(
-            ["wine", str(editor), "/compile", str(dest), "/include", str(MQL5_DIR / "Include")],
-            capture_output=True, text=True, timeout=30,
+            ["wine", str(editor), f'/compile:"{rel}"', "/log"],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(MT5_BASE),
         )
         print(f"Compile output:\n{result.stdout}")
-        if result.returncode != 0:
-            print(f"Compile errors:\n{result.stderr}")
-            return result.returncode
+        if result.stderr:
+            print(f"Stderr:\n{result.stderr}")
+        # Check for .log file
+        log_path = dest.with_suffix(".log")
+        if log_path.exists():
+            log_text = log_path.read_text(errors="replace")
+            # Print last 30 lines of log for quick review
+            lines = log_text.strip().splitlines()
+            if lines:
+                print(f"\nCompilation log ({len(lines)} lines):")
+                for line in lines[-30:]:
+                    print(f"  {line}")
+        return result.returncode
     except FileNotFoundError:
         print("Error: wine not found. Install wine first.")
         return 1
     except subprocess.TimeoutExpired:
-        print("Compile timed out (30s). Check MetaEditor for errors.")
+        print("Compile timed out (60s). Check MetaEditor for errors.")
         return 1
 
-    return 0
+
+def cmd_check(args):
+    """Syntax-check an MQ5 file without full compilation (/s flag).
+
+    Deploys the file to the MQL5 directory first, then runs syntax check.
+    Generates a .log file alongside the source.
+    """
+    src = Path(args.file).resolve()
+    if not src.exists():
+        print(f"Error: {src} not found")
+        return 1
+
+    editor = _find_editor()
+    if not editor:
+        print("Error: MetaEditor.exe not found in MT5 installation")
+        print(f"Searched: {MT5_BASE}")
+        return 1
+
+    # Deploy to MQL5 tree
+    program_type = detect_type(src)
+    dest_dir = MQL5_DIR / TYPE_DIRS.get(program_type, "Experts")
+    dest = dest_dir / src.name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    print(f"Deployed: {src.name} → {dest}")
+
+    # Syntax check: /compile:"path" /log /s
+    rel = dest.relative_to(MT5_BASE)
+    try:
+        result = subprocess.run(
+            ["wine", str(editor), f'/compile:"{rel}"', "/log", "/s"],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(MQL5_DIR.parent),
+        )
+        print(f"Syntax check output:\n{result.stdout}")
+        if result.stderr:
+            print(f"Stderr:\n{result.stderr}")
+        # Check for .log file
+        log_path = dest.with_suffix(".log")
+        if log_path.exists():
+            log_text = log_path.read_text(errors="replace")
+            lines = log_text.strip().splitlines()
+            if lines:
+                print(f"\nSyntax check log ({len(lines)} lines):")
+                for line in lines[-30:]:
+                    print(f"  {line}")
+        return result.returncode
+    except FileNotFoundError:
+        print("Error: wine not found. Install wine first.")
+        return 1
+    except subprocess.TimeoutExpired:
+        print("Syntax check timed out (60s).")
+        return 1
 
 
 def cmd_deploy(args):
@@ -132,14 +181,13 @@ def cmd_deploy(args):
         return 1
 
     program_type = detect_type(src)
-    dest_dir = get_dest_dir(program_type)
+    dest_dir = MQL5_DIR / TYPE_DIRS.get(program_type, "Experts")
     dest = dest_dir / src.name
-
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
     print(f"Deployed: {src.name} → {dest}")
     print(f"Type: {program_type}")
-    print(f"Compile in MetaEditor to generate .ex5")
+    print("Compile in MetaEditor or via: mql5_helper.py compile FILE.mq5")
     return 0
 
 
@@ -157,7 +205,6 @@ def cmd_status(args):
                 ex5 = list(d.rglob("*.ex5"))
                 print(f"  {subdir:12s}: {len(mq5)} .mq5, {len(ex5)} .ex5")
 
-    # Check account info via Wine terminal info
     print(f"\nTerminal:    {MT5_BASE / 'terminal64.exe'}")
     print(f"  Exists:    {(MT5_BASE / 'terminal64.exe').exists()}")
     return 0
@@ -183,7 +230,8 @@ def cmd_list(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MQL5 development helper")
+    parser = argparse.ArgumentParser(
+        description="MQL5 development helper (compile, check, deploy)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("status", help="Show MT5 installation status")
@@ -192,21 +240,22 @@ def main():
     compile_p = sub.add_parser("compile", help="Compile an MQ5 file")
     compile_p.add_argument("file", help="Path to .mq5 file")
 
+    check_p = sub.add_parser("check", help="Syntax-check an MQ5 file (no .ex5 output)")
+    check_p.add_argument("file", help="Path to .mq5 file")
+
     deploy_p = sub.add_parser("deploy", help="Deploy MQ5 to MQL5 directory")
     deploy_p.add_argument("file", help="Path to .mq5 file")
 
     args = parser.parse_args()
 
-    if args.command == "status":
-        return cmd_status(args)
-    elif args.command == "list":
-        return cmd_list(args)
-    elif args.command == "compile":
-        return cmd_compile(args)
-    elif args.command == "deploy":
-        return cmd_deploy(args)
-
-    return 0
+    commands = {
+        "status": cmd_status,
+        "list": cmd_list,
+        "compile": cmd_compile,
+        "check": cmd_check,
+        "deploy": cmd_deploy,
+    }
+    return commands[args.command](args)
 
 
 if __name__ == "__main__":
