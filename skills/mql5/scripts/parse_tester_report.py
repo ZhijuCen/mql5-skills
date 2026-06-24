@@ -569,6 +569,15 @@ def analyze_report(report: Report) -> dict:
     if not trades:
         return {"error": "No trades found", "trades": []}
 
+    # Parse backtest end date from period string (e.g. "2024.01.01 - 2025.06.22")
+    bt_end = None
+    period = report.settings.period
+    if " - " in period:
+        try:
+            bt_end = datetime.strptime(period.split(" - ")[1].strip(), "%Y.%m.%d")
+        except (ValueError, IndexError):
+            pass
+
     # Per-trade risk check
     for t in trades:
         t["risk_pct"] = abs(t["net"]) / deposit * 100 if deposit > 0 else 0
@@ -634,11 +643,12 @@ def analyze_report(report: Report) -> dict:
     lots = [t["volume"] for t in trades]
     unique_lots = sorted(set(lots))
 
-    # Last trade gap relative to script execution time
+    # Last trade gap relative to backtest end date
     last_close = trades[-1]["close_time"]
     try:
         last_dt = datetime.strptime(last_close, "%Y.%m.%d %H:%M:%S")
-        gap_days = (datetime.now() - last_dt).days
+        ref_date = bt_end if bt_end else datetime.now()
+        gap_days = (ref_date - last_dt).days
     except Exception:
         gap_days = -1
 
@@ -657,7 +667,7 @@ def analyze_report(report: Report) -> dict:
             "uniform": len(unique_lots) == 1,
         },
         "last_trade_close": last_close,
-        "gap_days_to_now": gap_days,
+        "gap_days_to_end": gap_days,
         "trades": trades,
     }
 
