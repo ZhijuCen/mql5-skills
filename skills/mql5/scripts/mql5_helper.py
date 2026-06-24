@@ -27,16 +27,21 @@ from pathlib import Path
 #   4. Hardcoded Wine fallback
 # MT5_BASE override via env var; MQL5_DIR detected from cwd implies MT5_BASE = parent.
 
-_MT5_EXECUTABLES = ("MetaEditor64.exe", "metaeditor64.exe",
-                     "terminal64.exe", "terminal.exe")
+# Preferred in order — MetaEditor first (needed for compile), case-sensitive
+_MT5_MARKERS = (
+    ("MetaEditor64.exe", 2),
+    ("metaeditor64.exe", 1),
+    ("terminal64.exe",   0),
+    ("terminal.exe",     0),
+)
 
 _MQL5_MARKERS = ("Experts", "Indicators", "Scripts")
 
 
 def _find_mt5_in_program_files() -> Path | None:
-    """Scan Program Files directories for a MetaTrader 5 installation."""
-    candidates = []
-    # Common Program Files locations
+    """Scan Program Files directories for a MetaTrader 5 installation.
+    Prefers directories containing MetaEditor64.exe (needed for compile)."""
+    found: list[tuple[int, Path]] = []
     for pf in ("Program Files", "Program Files (x86)"):
         for root in (Path("/"), Path.home()):
             pf_dir = root / pf
@@ -45,9 +50,16 @@ def _find_mt5_in_program_files() -> Path | None:
             for d in pf_dir.iterdir():
                 if not d.is_dir():
                     continue
-                if any((d / exe).exists() for exe in _MT5_EXECUTABLES):
-                    candidates.append(d)
-    return candidates[0] if candidates else None
+                score = -1
+                for exe, s in _MT5_MARKERS:
+                    if (d / exe).exists():
+                        score = max(score, s)
+                if score >= 0:
+                    found.append((score, d))
+    if not found:
+        return None
+    found.sort(key=lambda t: t[0], reverse=True)
+    return found[0][1]
 
 
 def _detect_mql5_from_cwd() -> Path | None:
@@ -114,16 +126,11 @@ def detect_type(file_path: Path) -> str:
 
 
 def _find_editor() -> Path | None:
-    """Locate MetaEditor64.exe / MetaEditor.exe in MT5 installation."""
-    candidates = [
-        MT5_BASE / "MetaEditor64.exe",
-        MT5_BASE / "MetaEditor.exe",
-    ]
-    for p in MT5_BASE.rglob("MetaEditor*.exe"):
-        candidates.append(p)
-    for c in candidates:
-        if c.exists():
-            return c
+    """Locate MetaEditor64.exe in MT5_BASE (case-sensitive exact match)."""
+    for name in ("MetaEditor64.exe", "MetaEditor.exe"):
+        p = MT5_BASE / name
+        if p.exists():
+            return p
     return None
 
 
