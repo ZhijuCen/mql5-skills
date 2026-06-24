@@ -20,12 +20,42 @@ import subprocess
 import sys
 from pathlib import Path
 
-# MT5 paths — override via env vars if not default locations
-#   MT5_BASE: MetaEditor/terminal install dir (default: Wine path)
-#   MQL5_DIR: MQL5 data dir (default: MT5_BASE/MQL5, correct for Linux/Wine;
-#             on Windows 10+ it's %APPDATA%\MetaQuotes\Terminal\<hex>\MQL5)
+# MT5 paths — resolved in order:
+#   1. MQL5_DIR env var (explicit override)
+#   2. Walk up from cwd — a dir containing Experts/ + Indicators/ is MQL5
+#   3. MT5_BASE / "MQL5" (default for Linux/Wine)
+# MT5_BASE override via env var; MQL5_DIR override implies MT5_BASE = parent.
+
 MT5_BASE = Path(os.environ.get("MT5_BASE", Path.home() / ".wine/drive_c/Program Files/MetaTrader 5"))
-MQL5_DIR = Path(os.environ.get("MQL5_DIR", MT5_BASE / "MQL5"))
+
+_MQL5_MARKERS = ("Experts", "Indicators", "Scripts")
+
+
+def _detect_mql5_from_cwd() -> Path | None:
+    """Walk up from cwd; return the first dir whose direct children include
+    at least two of the MQL5 marker subdirectories."""
+    d = Path.cwd()
+    while True:
+        hits = sum(1 for m in _MQL5_MARKERS if (d / m).is_dir())
+        if hits >= 2:
+            return d
+        parent = d.parent
+        if parent == d:  # reached filesystem root
+            return None
+        d = parent
+
+
+if "MQL5_DIR" in os.environ:
+    MQL5_DIR = Path(os.environ["MQL5_DIR"])
+else:
+    _detected = _detect_mql5_from_cwd()
+    if _detected:
+        MQL5_DIR = _detected
+        # Infer MT5_BASE from detected MQL5_DIR (parent on Linux/Wine)
+        if "MT5_BASE" not in os.environ:
+            MT5_BASE = MQL5_DIR.parent
+    else:
+        MQL5_DIR = MT5_BASE / "MQL5"
 
 # Type → directory mapping
 TYPE_DIRS = {
