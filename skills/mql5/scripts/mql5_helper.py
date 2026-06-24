@@ -20,9 +20,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-# MT5 paths — override via MT5_BASE env var if not default Wine location
+# MT5 paths — override via env vars if not default locations
+#   MT5_BASE: MetaEditor/terminal install dir (default: Wine path)
+#   MQL5_DIR: MQL5 data dir (default: MT5_BASE/MQL5, correct for Linux/Wine;
+#             on Windows 10+ it's %APPDATA%\MetaQuotes\Terminal\<hex>\MQL5)
 MT5_BASE = Path(os.environ.get("MT5_BASE", Path.home() / ".wine/drive_c/Program Files/MetaTrader 5"))
-MQL5_DIR = MT5_BASE / "MQL5"
+MQL5_DIR = Path(os.environ.get("MQL5_DIR", MT5_BASE / "MQL5"))
 
 # Type → directory mapping
 TYPE_DIRS = {
@@ -90,13 +93,12 @@ def cmd_compile(args):
     shutil.copy2(src, dest)
     print(f"Deployed: {src.name} → {dest}")
 
-    # Compile: /compile:"path" /log
-    rel = dest.relative_to(MT5_BASE)
+    # Compile: /compile:"path" /log (absolute path, cwd doesn't matter)
     try:
         result = subprocess.run(
-            ["wine", str(editor), f'/compile:"{rel}"', "/log"],
+            ["wine", str(editor), f'/compile:"{dest}"', "/log"],
             capture_output=True, text=True, timeout=60,
-            cwd=str(MT5_BASE),
+            cwd=str(dest.parent),
         )
         print(f"Compile output:\n{result.stdout}")
         if result.stderr:
@@ -145,13 +147,12 @@ def cmd_check(args):
     shutil.copy2(src, dest)
     print(f"Deployed: {src.name} → {dest}")
 
-    # Syntax check: /compile:"path" /log /s
-    rel = dest.relative_to(MT5_BASE)
+    # Syntax check: /compile:"path" /log /s (absolute path)
     try:
         result = subprocess.run(
-            ["wine", str(editor), f'/compile:"{rel}"', "/log", "/s"],
+            ["wine", str(editor), f'/compile:"{dest}"', "/log", "/s"],
             capture_output=True, text=True, timeout=60,
-            cwd=str(MQL5_DIR.parent),
+            cwd=str(dest.parent),
         )
         print(f"Syntax check output:\n{result.stdout}")
         if result.stderr:
