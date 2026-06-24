@@ -14,13 +14,14 @@ Usage:
 """
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-# Default MT5 paths
-MT5_BASE = Path.home() / ".wine/drive_c/Program Files/MetaTrader 5"
+# MT5 paths — override via MT5_BASE env var if not default Wine location
+MT5_BASE = Path(os.environ.get("MT5_BASE", Path.home() / ".wine/drive_c/Program Files/MetaTrader 5"))
 MQL5_DIR = MT5_BASE / "MQL5"
 
 # Type → directory mapping
