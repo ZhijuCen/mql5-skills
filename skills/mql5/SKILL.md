@@ -540,6 +540,124 @@ EA Development Cycle:
   Monitor → Collect Data → Refine → Repeat
 ```
 
+### Report Analysis — Interpreting Tester Results
+
+After each backtest, MT5 exports an HTML report. Use
+`scripts/parse_tester_report.py` to extract structured data, or read the
+HTML directly. Key areas to evaluate:
+
+#### 1. Data Quality Gate
+
+**Always check first.** If history quality is poor, all metrics are suspect.
+
+| Metric | Acceptable | Action if Failed |
+|--------|-----------|-----------------|
+| History Quality | ≥ 95% real ticks | Re-download tick data or use different broker |
+| Bars | Enough for strategy (e.g. 1000+ for H4) | Extend test period |
+| Modelling quality | Every tick or Every tick based on real ticks | Never trust "Open prices only" for final eval |
+
+#### 2. Profitability Metrics
+
+| Metric | Good | Warning | Bad |
+|--------|------|---------|-----|
+| Net Profit | > 0 | ≈ 0 | < 0 |
+| Profit Factor | > 1.5 | 1.0–1.5 | < 1.0 |
+| Expected Payoff | > 0 | ≈ 0 | < 0 |
+| Recovery Factor | > 2.0 | 1.0–2.0 | < 1.0 |
+
+**Profit Factor < 1.0** = guaranteed loss. The EA loses more than it wins.
+No amount of parameter tuning will fix a fundamentally negative PF — the
+strategy logic itself needs rethinking.
+
+#### 3. Drawdown Analysis
+
+Drawdown is the real killer. A 100% drawdown means account wiped.
+
+| Metric | Safe | Risky | Dangerous |
+|--------|------|-------|-----------|
+| Max DD% | < 20% | 20–50% | > 50% |
+| DD Absolute / Deposit | < 0.5x | 0.5–1x | > 1x (blown) |
+
+**Check both Balance DD and Equity DD.** Equity DD captures floating
+losses that haven't realized yet — often much worse than balance DD.
+
+If `Balance DD Max% ≈ 100%`, the account was wiped. Look at the balance
+curve: did it recover or flatline at zero?
+
+#### 4. Trade Distribution
+
+| Metric | Healthy | Concerning |
+|--------|---------|------------|
+| Win Rate | 40–60% | < 30% or > 70% |
+| Avg Win / Avg Loss | > 1.5 | < 1.0 |
+| Profit Trades % | > 40% | < 30% |
+| Largest Loss / Avg Loss | < 3x | > 5x (outlier risk) |
+
+Low win rate is fine if avg win >> avg loss (trend following).
+High win rate is fine if avg loss << avg win (mean reversion).
+**Red flag**: low win rate AND small avg win = guaranteed bleed.
+
+#### 5. Consecutive Losses
+
+| Metric | Tolerable | Stressed |
+|--------|-----------|----------|
+| Max Consecutive Losses | < 5 | > 8 |
+| Max Consecutive Loss $ | < 2x deposit | > deposit |
+
+More than 8 consecutive losses suggests the strategy has long anti-trend
+periods. With martingale or grid sizing, consecutive losses compound
+catastrophically.
+
+#### 6. Holding Time
+
+| Pattern | Meaning | Risk |
+|---------|---------|------|
+| Very short avg (< 1 min) | Scalping / arbitrage | Spread/slippage sensitive |
+| Very long avg (> 100 hrs) | Swing / position trading | Gap/overnight risk |
+| Huge variance (min vs max) | Mixed strategy | Hard to predict behavior |
+
+#### 7. MFE/MAE Analysis
+
+- **MFE (Most Favorable Excursion)**: how far price went in your favor
+  before exit. High MFE + low profit = premature exit (tight TP).
+- **MAE (Most Adverse Excursion)**: how far price went against you.
+  High MAE + small loss = lucky exit (SL barely held).
+- **Correlation (Profits, MAE)**: high positive = losses come from
+  large adverse moves (SL too loose or absent).
+- **Correlation (MFE, MAE)**: negative = when price moves far in one
+  direction, it doesn't retrace (good for trend following).
+
+#### 8. Stop-Out Detection
+
+Stop-outs (comment contains `so`) mean margin was insufficient — the
+broker force-closed before SL was reached. This is always a critical bug:
+
+```
+Root causes:
+1. SL too far from entry → floating loss exceeds available margin
+2. Lot size too large for account balance
+3. Risk per trade exceeds account capacity
+4. Multiple concurrent positions drain margin
+```
+
+Fix: reduce lot size, tighten SL, or reduce concurrent positions.
+
+#### 9. Short vs Long Bias
+
+Compare `Short Trades (won%)` vs `Long Trades (won%)`:
+
+- Heavily skewed (e.g. 91 long / 5 short) → EA only trades one direction
+- Check if this is intentional (bullish filter) or a bug
+- In trending markets, one-direction bias can mask poor signal quality
+
+#### 10. Commission & Swap Impact
+
+In the Deals table, check `Commission` and `Swap` columns:
+
+- Commission should be consistent per deal (proportional to volume)
+- Swap accumulates on overnight positions — can turn winners into losers
+- `Profit = Price P&L + Commission + Swap` — verify this sums correctly
+
 ## 7. Event Handlers Reference
 
 | Handler | When Called | Use Case |
