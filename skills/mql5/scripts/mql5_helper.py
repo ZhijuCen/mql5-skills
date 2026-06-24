@@ -23,12 +23,31 @@ from pathlib import Path
 # MT5 paths — resolved in order:
 #   1. MQL5_DIR env var (explicit override)
 #   2. Walk up from cwd — a dir containing Experts/ + Indicators/ is MQL5
-#   3. MT5_BASE / "MQL5" (default for Linux/Wine)
-# MT5_BASE override via env var; MQL5_DIR override implies MT5_BASE = parent.
+#   3. Scan Program Files subdirs for MetaEditor/terminal executables
+#   4. Hardcoded Wine fallback
+# MT5_BASE override via env var; MQL5_DIR detected from cwd implies MT5_BASE = parent.
 
-MT5_BASE = Path(os.environ.get("MT5_BASE", Path.home() / ".wine/drive_c/Program Files/MetaTrader 5"))
+_MT5_EXECUTABLES = ("MetaEditor64.exe", "metaeditor64.exe",
+                     "terminal64.exe", "terminal.exe")
 
 _MQL5_MARKERS = ("Experts", "Indicators", "Scripts")
+
+
+def _find_mt5_in_program_files() -> Path | None:
+    """Scan Program Files directories for a MetaTrader 5 installation."""
+    candidates = []
+    # Common Program Files locations
+    for pf in ("Program Files", "Program Files (x86)"):
+        for root in (Path("/"), Path.home()):
+            pf_dir = root / pf
+            if not pf_dir.is_dir():
+                continue
+            for d in pf_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                if any((d / exe).exists() for exe in _MT5_EXECUTABLES):
+                    candidates.append(d)
+    return candidates[0] if candidates else None
 
 
 def _detect_mql5_from_cwd() -> Path | None:
@@ -45,13 +64,23 @@ def _detect_mql5_from_cwd() -> Path | None:
         d = parent
 
 
+# --- Resolve MT5_BASE ---
+if "MT5_BASE" in os.environ:
+    MT5_BASE = Path(os.environ["MT5_BASE"])
+else:
+    _found = _find_mt5_in_program_files()
+    if _found:
+        MT5_BASE = _found
+    else:
+        MT5_BASE = Path.home() / ".wine/drive_c/Program Files/MetaTrader 5"
+
+# --- Resolve MQL5_DIR ---
 if "MQL5_DIR" in os.environ:
     MQL5_DIR = Path(os.environ["MQL5_DIR"])
 else:
     _detected = _detect_mql5_from_cwd()
     if _detected:
         MQL5_DIR = _detected
-        # Infer MT5_BASE from detected MQL5_DIR (parent on Linux/Wine)
         if "MT5_BASE" not in os.environ:
             MT5_BASE = MQL5_DIR.parent
     else:
