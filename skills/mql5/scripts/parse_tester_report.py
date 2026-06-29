@@ -429,7 +429,7 @@ def parse_report(html_path: Path) -> Report:
 
 # ── Pretty print ─────────────────────────────────────────────────────
 
-def print_report(r: Report) -> None:
+def print_report(r: Report, analyze_data: dict | None = None) -> None:
     s = r.settings
     res = r.results
 
@@ -498,6 +498,8 @@ def print_report(r: Report) -> None:
     print("  Holding Times")
     print(f"{'─' * 72}")
     print(f"  Min: {res.min_hold_time}  Max: {res.max_hold_time}  Avg: {res.avg_hold_time}")
+    if analyze_data:
+        print(f"  Idle (no position): {analyze_data.get('idle_time', '')}")
 
     print(f"\n{'─' * 72}")
     print(f"  Orders: {len(r.orders)}    Deals: {len(r.deals)}")
@@ -559,9 +561,19 @@ def pair_trades(deals: list) -> list:
     return trades
 
 
+def format_duration(td) -> str:
+    """Format timedelta as HH:MM:SS."""
+    total = int(td.total_seconds())
+    sign = "-" if total < 0 else ""
+    total = abs(total)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{sign}{h:02d}:{m:02d}:{s:02d}"
+
+
 def analyze_report(report: Report) -> dict:
     """Run full trade analysis on parsed report."""
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     deposit = report.settings.initial_deposit
     trades = pair_trades(report.deals)
@@ -569,13 +581,18 @@ def analyze_report(report: Report) -> dict:
     if not trades:
         return {"error": "No trades found", "trades": []}
 
-    # Parse backtest end date from period string (e.g. "H4 (2024.01.01 - 2025.06.22)")
+    # Parse backtest start/end dates from period string
+    # e.g. "H4 (2024.01.01 - 2025.06.22)"
+    bt_start = None
     bt_end = None
     period = report.settings.period
-    m = re.search(r"(\d{4}\.\d{2}\.\d{2})\s*\)\s*$", period)
-    if m:
+    m_dates = re.search(
+        r"(\d{4}\.\d{2}\.\d{2})\s*-\s*(\d{4}\.\d{2}\.\d{2})\s*\)\s*$", period
+    )
+    if m_dates:
         try:
-            bt_end = datetime.strptime(m.group(1), "%Y.%m.%d")
+            bt_start = datetime.strptime(m_dates.group(1), "%Y.%m.%d")
+            bt_end = datetime.strptime(m_dates.group(2), "%Y.%m.%d")
         except ValueError:
             pass
 
@@ -644,14 +661,17 @@ def analyze_report(report: Report) -> dict:
     lots = [t["volume"] for t in trades]
     unique_lots = sorted(set(lots))
 
-    # Last trade gap relative to backtest end date
-    last_close = trades[-1]["close_time"]
-    try:
-        last_dt = datetime.strptime(last_close, "%Y.%m.%d %H:%M:%S")
-        ref_date = bt_end if bt_end else datetime.now()
-        gap_days = (ref_date - last_dt).days
-    except Exception:
-        gap_days = -1
+    # Idle time: total backtest duration minus time in positions
+    idle_str = ""
+    if bt_start and bt_end:
+        total_duration = bt_end - bt_start
+        position_time = timedelta()
+        for t in trades:
+            close_dt = datetime.strptime(t["close_time"], "%Y.%m.%d %H:%M:%S")
+            open_dt = datetime.strptime(t["open_time"], "%Y.%m.%d %H:%M:%S")
+            position_time += close_dt - open_dt
+        idle_td = total_duration - position_time
+        idle_str = format_duration(idle_td)
 
     return {
         "sl_hits": len(sl_trades),
@@ -667,8 +687,7 @@ def analyze_report(report: Report) -> dict:
             "unique_lots": unique_lots,
             "uniform": len(unique_lots) == 1,
         },
-        "last_trade_close": last_close,
-        "gap_days_to_end": gap_days,
+        "idle_time": idle_str,
         "trades": trades,
     }
 
@@ -690,14 +709,17 @@ def main():
 
     report = parse_report(path)
 
+    # Always compute analyze data (needed for idle_time in text report)
+    analyze_data = analyze_report(report)
+
     if args.analyze:
         report_dict = asdict(report)
-        report_dict["analyze"] = analyze_report(report)
+        report_dict["analyze"] = analyze_data
         print(json.dumps(report_dict, indent=2, ensure_ascii=False))
     elif args.json:
         print(json.dumps(asdict(report), indent=2, ensure_ascii=False))
     else:
-        print_report(report)
+        print_report(report, analyze_data)
 
 
 if __name__ == "__main__":
