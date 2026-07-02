@@ -36,6 +36,7 @@ mql5-skills/
 │       ├── scripts/
 │       │   ├── mql5_helper.py            # Compile/deploy/status via Wine
 │       │   ├── parse_tester_report.py    # Backtest report parser + analysis
+│       │   ├── parse_optimizer_report.py # Optimization report parser + analysis
 │       │   └── verify_sl_tp_formulas.py  # SL/TP risk formula verification
 │       └── references/
 │           ├── book/      # Programming book markdown (from sitemap_book_en.xml)
@@ -92,6 +93,38 @@ python skills/mql5/scripts/parse_tester_report.py <report.html> --analyze
 
 Key analysis fields: `idle_time` (HH:MM:SS flat duration across backtest period),
 `win_loss_ratio`, `breakeven_win_rate`, `monthly`, `reentries`, `lot_pattern`.
+
+### parse_optimizer_report.py
+
+Parses MT5 Strategy Tester Optimization XML reports (SpreadsheetML format
+— XML-tagged Excel workbook, also openable in LibreOffice Calc). Companion
+to `parse_tester_report.py`; same three output modes:
+
+```
+python skills/mql5/scripts/parse_optimizer_report.py <ReportOptimizer-*.xml>
+python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --json
+python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --analyze
+```
+
+Reads `<DocumentProperties>` for the strategy environment card
+(EA / Symbol / Period / Date range from `Title`, plus Deposit / Leverage /
+Server / MT5 build / run timestamp) and the single "Tester Optimizator
+Results" worksheet for one row per parameter pass. `--analyze` adds:
+
+- **Orthogonality**: actual pass count vs expected cartesian product
+- **Parameter effect**: which Inp* parameters actually move the result
+  (vs. dead parameters that should be removed from optimization)
+- **Dead boolean parameters**: bit-for-bit identical true/false groups
+  on key metrics — cleanest signal of a parameter not wired into the EA
+- **Duplicate metric vectors**: high count (>30%) usually points to a
+  dead parameter
+- **Best passes** by Profit / Profit Factor / Recovery Factor / Custom
+- **Trade count distribution** with daily rate and correlations vs
+  profit / drawdown (overtrading detection)
+
+Use alongside `parse_tester_report.py` for the same EA: the latter
+explains *why* a specific pass performs, the former explains *which*
+pass performs and *which* parameters are even worth tuning.
 
 ### mql5_helper.py
 

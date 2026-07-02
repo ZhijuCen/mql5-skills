@@ -517,6 +517,7 @@ must be performed through the MT5 Strategy Tester GUI.
 | Run backtest | ❌ | GUI only: Strategy Tester |
 | Run optimization | ❌ | GUI only: Strategy Tester |
 | Parse test report | ✅ | `scripts/parse_tester_report.py` |
+| Parse optimization report | ✅ | `scripts/parse_optimizer_report.py` |
 
 MetaEditor CLI syntax (Linux/Wine, from MT5 base directory):
 ```
@@ -775,6 +776,156 @@ detection, streak analysis). For raw data, use `--json` instead.
    regardless of SL distance = minLot clamp bug.
 6. **Monthly breakdown**: Group trades by month, compute win rate and net P&L
    per month. Identify worst months and correlate with market conditions.
+
+### Optimization Report Analysis
+
+Optimization exports a different artifact: a single-worksheet XML-tagged
+Excel workbook (`ReportOptimizer-*.xml`, also openable in LibreOffice Calc).
+Each row is one parameter pass; the first worksheet name is
+`Tester Optimizator Results`. Use `scripts/parse_optimizer_report.py` to
+extract and analyze it. The script has three modes:
+
+```bash
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml --json
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml --analyze
+```
+
+The `Title` field in `<DocumentProperties>` encodes the strategy
+environment on one line: `<EA> <SYMBOL>,<PERIOD> <YYYY.MM.DD>-<YYYY.MM.DD>`.
+`<DocumentProperties>` also carries `Deposit`, `Leverage`, `Server`,
+MT5 `Version`/`Build`, and the run timestamp — use these to verify the
+backtest ran on the intended setup (wrong demo server, wrong leverage,
+or stale build all invalidate the run).
+
+#### 1. Strategy Environment Card
+
+Read the parsed `env_card` first. Confirm before evaluating any pass:
+
+- **EA / Symbol / Period / Date range** match the spec
+- **Deposit × Leverage** match the broker account class
+- **Server** is the intended broker (demo vs live, broker name)
+- **MT5 build** is current (5.00 / build 5000+ as of 2025)
+- **Date range** covers the regime you want to test (≥ 1 year for swing,
+  ≥ 3 years for trend)
+
+If the date range is shorter than the strategy's intended holding period,
+the optimization is structurally biased.
+
+#### 2. Orthogonality Check
+
+Compare `orthogonality.actual` vs `orthogonality.expected_cartesian` (product
+of parameter cardinalities). Mismatch means the Strategy Tester skipped
+passes (e.g. due to errors) — the table is incomplete and per-parameter
+means will be biased. Re-run with longer timeout or fix the EA so every
+pass completes.
+
+#### 3. Dead Parameter Detection
+
+The single highest-value analysis step. A "dead" parameter is one whose
+value has no measurable effect on any output metric. The script flags two
+patterns:
+
+- **`parameter_effect[X].dead_param == true`**: the per-group mean
+  Profit range is < 1% of the maximum group mean. This parameter is not
+  doing anything; remove it from optimization to halve the search space.
+- **`dead_boolean_params[X]`**: for a boolean Inp* (e.g. NewsFilter), all
+  metrics (Profit, PF, RF, Trades) are bit-for-bit identical between
+  `true` and `false` groups. This is the cleanest dead-parameter signal:
+  the parameter is either never read in the EA, or it toggles a code path
+  that never triggers on this backtest.
+
+When you see dead boolean parameters, check the EA's logic for that input:
+is the toggle actually wired? `if(InpUseNewsFilter) { ... }` requires
+genuine news data to take effect — if the EA cannot load news (wrong
+calendar URL, demo server, off-hours), the filter silently no-ops.
+
+#### 4. Duplicate Metric Vectors
+
+`duplicates.groups_with_dupes` counts rows with identical metric vectors
+(Profit, PF, RF, Trades, ...). A high count (>30% of total) almost always
+points to a dead parameter — the duplicated rows differ only in the dead
+parameter's value. Example: 432 passes with a binary dead parameter will
+collapse to 216 unique metric vectors, producing 216 duplicate pairs.
+
+#### 5. Best Pass Selection — Use Multiple Criteria
+
+The script reports top-5 by four criteria. They usually agree on the top
+few but diverge on the tail. Read them together:
+
+| Criterion | Favors | Watch out |
+|-----------|--------|-----------|
+| **Profit** | Total return | Can hide low win rate with lucky runs |
+| **Profit Factor** | Edge per unit of risk | Trade-count blind (low n) |
+| **Recovery Factor** | Return per unit of max DD | Inflated by small DD, not big wins |
+| **Custom (OnTester)** | Whatever your `OnTester()` returns | If OnTester only counts profit, equivalent to Profit |
+
+For a robust pick, find the pass that appears in multiple top-5 lists AND
+has a `Trades` count near the median (statistical significance). A
+pass with 161 trades near the min is barely significant; a pass with 175
+trades is the most reliable signal.
+
+#### 6. Parameter Effect Ranking
+
+`parameter_effect` orders parameters by `effect_ratio_spread_over_std`
+(= spread between best and worst group means, divided by the global
+Profit std). This is a quick "how much does each parameter matter" view:
+
+- `effect_ratio > 1.0` — dominant driver, focus tuning here
+- `0.3 < ratio < 1.0` — meaningful but secondary
+- `ratio < 0.3` — weak; many values perform similarly
+
+Combined with the per-group means, this tells you the gradient direction:
+if `InpSLPips=30` mean is 269 and `InpSLPips=50` mean is 108, SL=30 wins
+by 161. But beware counterintuitive results (e.g. tighter SL winning on
+mean Profit) — they often mean SL is rarely hit and the "edge" is just
+trade-count noise.
+
+#### 7. Trade Count Distribution
+
+`trades.deciles` and `trades.corr_trades_vs_*` expose overtrading and
+under-trading patterns. Watch for:
+
+- **`corr_trades_vs_profit < -0.3`**: more trades → less profit.
+  Strategy degrades as it scales; common with mean-reversion or
+  re-entry on loss.
+- **`corr_trades_vs_equity_dd > 0.3`**: more trades → more drawdown.
+  Overtuning costs both ways.
+- **`trades_per_day_median`**: convert the trade count to a rate against
+  the backtest days. < 0.1/day for H4 = fine, > 1/day on H4 = scalper
+  regime (spread-sensitive).
+
+The trade-count RANGE itself is diagnostic. Range of 14 (161-175) on 432
+passes means parameters only changed entry/exit timing slightly, not the
+core signal. Range of 50+ means a parameter is blocking trades entirely.
+
+#### 8. Cross-Analysis: `param_cross`
+
+`param_cross[X]` is the per-X mean Profit/PF/Trades table — the most
+direct view of each parameter's gradient. To decide whether to widen
+or narrow the optimization range, check the edges: are the best and
+worst values at the boundaries of your range? If yes, the optimum may lie
+outside — re-run with a wider range.
+
+#### 9. Optimization Reporting Template
+
+When reporting optimization results, include:
+
+1. **Environment card** (EA, symbol, period, date range, deposit, server)
+2. **Pass count** vs expected cartesian (orthogonality status)
+3. **Dead parameters** (if any) — these are bugs to fix, not "remove from
+   optimization" wins
+4. **Top-3 passes by Profit**, with their parameter vector
+5. **Top-3 by Recovery Factor** (more important than raw profit for live
+   trading)
+6. **Trade count distribution** (median, range, correlation with profit)
+7. **Per-parameter gradient** (which direction to push next iteration)
+8. **Recommended next pass** (extend ranges if any edge is the optimum)
+
+Skip the "best PF" and "best recovery factor" sections only when they
+identify the same pass as "best profit" — otherwise the disagreement is
+the most interesting finding (it means there's a regime-specific trade-off
+you should investigate, not average away).
 
 ## 7. Event Handlers Reference
 
