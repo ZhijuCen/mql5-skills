@@ -777,6 +777,61 @@ detection, streak analysis). For raw data, use `--json` instead.
 6. **Monthly breakdown**: Group trades by month, compute win rate and net P&L
    per month. Identify worst months and correlate with market conditions.
 
+#### 13. Time-Window Stability (Over-Fitting Detection)
+
+Aggregate metrics over the full backtest period can hide **regime
+change** — the strategy might be profitable in H2 2025 and
+catastrophic in H1 2025, with the two cancelling out to a "good"
+net profit. To detect this, use the `windows` subcommand to slice
+the backtest into N equal time windows and recompute the same 7
+metrics per window:
+
+```bash
+python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count 4
+python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count 6 --json
+```
+
+Each window is flagged `▲2σ`, `■EXT`, or `-` based on the per-metric
+z-score (this window's value − mean across all windows) / std:
+
+- `▲2σ` — at least one metric has |z| ≥ 2 (notable — this window's
+  value is far from the rest of the windows). The marker is followed
+  by `k=N` (count of outlier metrics) and the metric abbreviations
+  with their signed z (e.g. `prof(+2.3σ),reco(+2.3σ)`).
+- `■EXT` — at least one metric has |z| ≥ 5 (extreme — extreme outlier).
+  Same `k=N` breakdown.
+- `-` — no metric crosses the thresholds.
+
+z is sign-bearing (+/-); the threshold is on |z|. Lower-is-better
+metrics (bal_dd_rel_pct) are NOT inverted — a negative z means
+"unusually low DD" (good for safety, neutral for consistency), a
+positive z means "unusually high DD" (a red flag). For all other
+metrics, the natural sign applies (high profit, high PF, etc. = good).
+
+**Red flags (over-fitting / regime change):**
+
+- A single window with a `■EXT` (|z|≥5) outlier on any metric — a
+  window whose value is 5 standard deviations from the rest is
+  almost certainly a different regime (or a metric that is
+  unstable across the backtest).
+- Several windows each with their own `▲2σ` outliers on different
+  metrics — high cross-metric variance.
+- A monotonic gradient in the raw values (e.g. profit rising from
+  win 0 to win N-1) — the strategy performs better late in the
+  backtest; could be a regime change or could be selection bias.
+|- Adjacent windows have very different `bal_dd_rel_pct` (e.g. 5% vs
+  35%) — the strategy behaves inconsistently across sub-regimes.
+
+**Use `--count 1` first** to verify the calculation matches the full
+report within tolerance. Of 7 metrics, 4 are exact (Profit, EP, PF,
+Trades); 3 are documented approximations: Recovery Factor (downstream
+of bal_dd_rel_abs), Balance DD Rel% (maximum relative drawdown from
+the balance curve — matches HTML's Balance Drawdown Relative within
+0.03% on 246753), and Sharpe Ratio (MT5's reported value is
+inconsistent with the textbook formula the MQL5 community
+reverse-engineers derive — see the cross-check table printed at the
+end of the N=1 output).
+
 ### Optimization Report Analysis
 
 Optimization exports a different artifact: a single-worksheet XML-tagged
@@ -1128,7 +1183,6 @@ void OnTick() {
     // trade.Buy(lots, _Symbol, 0, sl, 0, "EA Signal");
 }
 
-//+------------------------------------------------------------------+
 double OnTester() {
     double trades = TesterStatistics(STAT_TRADES);
     if (trades < 30) return 0;

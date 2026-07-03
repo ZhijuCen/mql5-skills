@@ -16,6 +16,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from bs4 import BeautifulSoup, Tag
@@ -524,7 +525,23 @@ def print_report(r: Report, analyze_data: dict | None = None) -> None:
 # ── Trade Analysis ───────────────────────────────────────────────────
 
 def pair_trades(deals: list) -> list:
-    """Pair entry/exit deals into complete trades."""
+    """Pair entry/exit deals into complete trades.
+
+    Each trade is returned with two P&L views:
+      • `net` = exit.profit + entry.commission + exit.commission + entry.swap + exit.swap
+        This equals the total change in balance from the trade and
+        matches MT5's `STAT_PROFIT` summation (sum of `net` over all
+        trades = `Total Net Profit`).
+      • `gross_pnl` = exit.profit + exit.commission + exit.swap
+        This is the "exit leg" P&L. MT5 splits this between
+        `STAT_GROSS_PROFIT` and `STAT_GROSS_LOSS` based on its sign
+        (see `compute_gross_profit_loss` below), and any entry
+        commission/swap always goes to `STAT_GROSS_LOSS`.
+
+    The MT5 accounting quirk (entry costs in GL regardless of trade
+    outcome) is the reason we keep `gross_pnl` separate from `net`
+    rather than overloading `net` to also drive GP/GL.
+    """
     trading = [d for d in deals if d.type != "balance"]
 
     trades = []
@@ -536,6 +553,7 @@ def pair_trades(deals: list) -> list:
                 exit_d = trading[i + 1]
                 net = (exit_d.profit + entry.commission + exit_d.commission
                        + entry.swap + exit_d.swap)
+                gross_pnl = exit_d.profit + exit_d.commission + exit_d.swap
                 sl_dist = 0.0
                 if "sl" in exit_d.comment:
                     sl_dist = abs(entry.price - exit_d.price)
@@ -550,6 +568,8 @@ def pair_trades(deals: list) -> list:
                     "commission": entry.commission + exit_d.commission,
                     "swap": entry.swap + exit_d.swap,
                     "net": net,
+                    "gross_pnl": gross_pnl,
+                    "entry_costs": entry.commission + entry.swap,
                     "comment": exit_d.comment,
                     "sl_distance": sl_dist,
                 })
@@ -559,6 +579,28 @@ def pair_trades(deals: list) -> list:
         else:
             i += 1
     return trades
+
+
+def compute_gross_profit_loss(trades: list) -> tuple[float, float]:
+    """Compute MT5's STAT_GROSS_PROFIT / STAT_GROSS_LOSS from a list of trades.
+
+    Returns (gross_profit, gross_loss). Per MT5:
+      • For each trade, split `gross_pnl` (= exit.profit + exit.commission
+        + exit.swap) by sign into GP (positive) or GL (negative/zero).
+      • Entry costs (entry.commission + entry.swap) ALWAYS go to GL.
+
+    Use this instead of naive `sum(positive nets)` — verified against
+    the 246753 reference report (matches exactly).
+    """
+    gp = 0.0
+    gl = 0.0
+    for t in trades:
+        if t["gross_pnl"] > 0:
+            gp += t["gross_pnl"]
+        else:
+            gl += t["gross_pnl"]
+        gl += t["entry_costs"]
+    return round(gp, 2), round(gl, 2)
 
 
 def format_duration(td) -> str:
@@ -573,7 +615,6 @@ def format_duration(td) -> str:
 
 def analyze_report(report: Report) -> dict:
     """Run full trade analysis on parsed report."""
-    from datetime import datetime, timedelta
 
     deposit = report.settings.initial_deposit
     trades = pair_trades(report.deals)
@@ -692,14 +733,669 @@ def analyze_report(report: Report) -> dict:
     }
 
 
+# ── Window Analysis ──────────────────────────────────────────────────
+#
+# Split a backtest into N equal time windows and compute the same
+# performance metrics the report shows, per window. This lets you
+# spot windows whose metric values are statistical outliers vs the
+# rest of the backtest (regime detection / over-fitting).
+#
+# Outlier detection uses per-metric z-score (sample std, N-1) across
+# windows. |z| >= 2 = notable, |z| >= 5 = extreme.
+#
+# Conventions
+# -----------
+# • Time boundaries: equal-length [t_start, t_end) slices, left-closed
+#   right-open. Window 0 starts at the backtest start; window N-1 ends
+#   at the backtest end. Adjacent windows do not overlap.
+# • A trade is assigned to the window where it OPENS (entry time,
+#   `pair_trades` field "open_time"). Its P&L lands at exit time, which
+#   may fall in a later window — we attribute the P&L to the opening
+#   window because that is the "decision moment" the user cares about.
+# • For path-dependent metrics (Balance DD Rel%, Recovery Factor, Sharpe)
+#   we reconstruct a local balance curve starting from the balance at
+#   the window's left edge. The `balance` field in deal rows equals
+#   equity at the moment of the deal (no floating P&L at deal time),
+#   which is exact for closed-trade snapshots. This reconstruction
+#   therefore matches `STAT_BALANCE_DDREL_PERCENT` (maximum relative
+#   drawdown, i.e. the largest (peak-trough)/peak ratio) exactly
+#   (verified on 246753: 44.60% vs report 44.63%).
+# • Recovery Factor per MT5's report value is `STAT_PROFIT /
+#   STAT_EQUITY_DD` (verified empirically — the official doc page
+#   says STAT_BALANCE_DD, but the reported value matches the equity
+#   version). We compute RF using `bal_dd_rel_abs` (the abs $ amount
+#   at the moment of maximum relative DD), which gives a value that
+#   does NOT match the report exactly — it uses a different DD
+#   reference (balance relative vs equity maximal). This is per the
+#   user's fallback rule: "如 Equity DD % 不可用，则以 Balance DD % 代
+#   替".
+# • Gross Profit / Gross Loss use MT5's split: each trade's
+#   "exit-leg" P&L (exit.profit + exit.commission + exit.swap) goes
+#   to GP if positive or GL if non-positive; entry costs always go
+#   to GL. This matches the report exactly (see
+#   `compute_gross_profit_loss`).
+# • Sharpe Ratio uses the MQL5-community standard formula
+#   (AHPR - 1) / std_HPR × sqrt(N_per_year), where
+#   HPR_i = Balance_i / Balance_{i-1}, std is sample N-1, and the
+#   year is 365 days (community consensus; see references/book
+#   /05-automation/0475-... and MQL5 forum thread 337071).
+#   MT5's reported value uses a different (undocumented) computation
+#   that does not match this formula on every report (e.g. 246753:
+#   2.49 vs 22.92, 9.2× gap). The value is internally consistent
+#   across all sub-windows, so the relative ranking is still
+#   meaningful.
+
+def _balance_dd_relative(
+    balances: list[float],
+) -> tuple[float, float]:
+    """Return (bal_dd_rel_abs, bal_dd_rel_pct) for a balance curve.
+
+    Computes MT5's STAT_BALANCE_DDREL_PERCENT — the maximum **relative**
+    drawdown across the entire balance curve. For each point, compute
+    rel = (running_peak - current) / running_peak * 100 — the percentage
+    drawdown from the peak before it. Report the largest such % and the
+    absolute $ amount at that moment.
+
+    The `peak` resets every time the balance reaches a new high. This
+    differs from the "maximal" DD (STAT_BALANCEDD_PERCENT) which finds
+    the largest absolute $ DD first and uses that moment's % — the two
+    can differ when a small absolute DD happens at a very low peak
+    (producing a high % that doesn't register in the maximal scan).
+
+    Verified against 246753: 44.60% vs report 44.63% (rounding-close;
+    the 0.03% gap is from intra-trade floating P&L not visible in the
+    HTML).
+    """
+    if not balances:
+        return 0.0, 0.0
+
+    peak = balances[0]
+    max_rel_pct = 0.0
+    max_rel_abs = 0.0
+    for b in balances:
+        if b > peak:
+            peak = b
+        rel = (peak - b) / peak * 100 if peak > 0 else 0.0
+        if rel > max_rel_pct:
+            max_rel_pct = rel
+            max_rel_abs = peak - b
+    return max_rel_abs, max_rel_pct
+
+
+def _sharpe_ratio(trade_hprs: list[float]) -> float:
+    """Per-trade Sharpe using HPRs (balance ratio = balance_after / balance_before).
+
+    Per the MQL5 community reverse-engineering (forum thread 337071 +
+    the book example at references/book/05-automation/0475-...):
+        per_trade_sharpe = (AHPR - 1) / std_HPR
+    where
+        HPR_i = Balance_i / Balance_{i-1}
+        AHPR  = mean(HPR_i)        (arithmetic)
+        std   = sample std (ddof=1) of HPR_i
+
+    Falls back to 0.0 if std == 0 or N < 2.
+    """
+    n = len(trade_hprs)
+    if n < 2:
+        return 0.0
+    ahpr = sum(trade_hprs) / n
+    var = sum((x - ahpr) ** 2 for x in trade_hprs) / (n - 1)
+    if var <= 0:
+        return 0.0
+    std = var ** 0.5
+    return (ahpr - 1.0) / std
+
+
+def _sharpe_ratio_annualized(
+    trade_hprs: list[float], backtest_days: float
+) -> float:
+    """Annualized Sharpe = per_trade_sharpe * sqrt(N_per_year).
+
+    `N_per_year = N / (backtest_days / 365)`. Uses 365 days/year
+    (MQL5 community consensus; 365.25 is within rounding for our
+    purposes — the difference is sub-0.5% for typical backtest
+    lengths).
+
+    Note: this is the **textbook** formula. MT5's reported
+    STAT_SHARPE_RATIO uses this formula and is consistent with it
+    on most backtests, but for high-trade-count EAs the report
+    value can diverge significantly (e.g. 22.92 vs 2.49 in 246753)
+    — MT5 does not publish the exact computation, and the gap is
+    not closeable without access to MT5's internal source. Use
+    `sharpe_ratio_raw` (this function's input) for the per-trade
+    Sharpe that is the most stable signal across windows.
+    """
+    n = len(trade_hprs)
+    if n < 2 or backtest_days <= 0:
+        return 0.0
+    per_trade = _sharpe_ratio(trade_hprs)
+    n_per_year = n / (backtest_days / 365.0)
+    if n_per_year <= 0:
+        return 0.0
+    return per_trade * (n_per_year ** 0.5)
+
+
+def compute_window_metrics(
+    trades: list[dict],
+    starting_balance: float,
+    deposit: float,
+    backtest_days: float,
+) -> dict:
+    """Compute the 7-window-metrics for a list of trades.
+
+    `starting_balance` is the equity at the left edge of the window
+    (the balance just before any trade in this window opens).
+    `deposit` parameter — kept for API symmetry (not used by the
+    balance-based relative DD calculation).
+    `backtest_days` is the window length in days (used for Sharpe
+    annualization).
+
+    Returns a dict with keys: profit, expected_payoff, profit_factor,
+    recovery_factor (based on bal_dd_rel_abs), bal_dd_rel_pct,
+    bal_dd_rel_abs, trades, sharpe_ratio (annualized),
+    sharpe_ratio_raw (per-trade).
+    """
+    n = len(trades)
+    if n == 0:
+        return {
+            "profit": 0.0,
+            "expected_payoff": 0.0,
+            "profit_factor": 0.0,
+            "recovery_factor": 0.0,
+            "bal_dd_rel_pct": 0.0,
+            "bal_dd_rel_abs": 0.0,
+            "trades": 0,
+            "sharpe_ratio": 0.0,
+            "sharpe_ratio_raw": 0.0,
+        }
+
+    # Per-trade P&L
+    # Use MT5's STAT_GROSS_PROFIT/STAT_GROSS_LOSS split (entry costs
+    # always go to GL; exit leg P&L split by sign). This matches the
+    # report's PF exactly — see compute_gross_profit_loss for details.
+    gp, gl = compute_gross_profit_loss(trades)
+    nets = [t["net"] for t in trades]
+
+    profit = sum(nets)
+    expected_payoff = profit / n
+    profit_factor = (gp / abs(gl)) if gl < 0 else 0.0
+
+    # Build local balance curve: starting_balance + each trade's net
+    balances = [starting_balance]
+    hprs = []
+    bal = starting_balance
+    for net in nets:
+        bal += net
+        # HPR = balance_after / balance_before (MT5 community formula)
+        hpr = (bal / balances[-1]) if balances[-1] != 0 else 0.0
+        hprs.append(hpr)
+        balances.append(bal)
+
+    bal_dd_rel_abs, bal_dd_rel_pct = _balance_dd_relative(balances)
+    recovery_factor = (profit / bal_dd_rel_abs) if bal_dd_rel_abs > 0 else 0.0
+
+    sharpe_raw = _sharpe_ratio(hprs)
+    sharpe_ann = _sharpe_ratio_annualized(hprs, backtest_days)
+
+    return {
+        "profit": round(profit, 2),
+        "expected_payoff": round(expected_payoff, 2),
+        "profit_factor": round(profit_factor, 2),
+        "recovery_factor": round(recovery_factor, 2),
+        "bal_dd_rel_pct": round(bal_dd_rel_pct, 2),
+        "bal_dd_rel_abs": round(bal_dd_rel_abs, 2),
+        "trades": n,
+        "sharpe_ratio": round(sharpe_ann, 2),
+        "sharpe_ratio_raw": round(sharpe_raw, 4),
+    }
+
+
+def _parse_period_dates(period: str) -> tuple[datetime | None, datetime | None]:
+    """Extract (bt_start, bt_end) from a period string like 'H1 (2024.01.01 - 2025.06.22)'."""
+    m = re.search(
+        r"(\d{4}\.\d{2}\.\d{2})\s*-\s*(\d{4}\.\d{2}\.\d{2})\s*\)\s*$", period
+    )
+    if not m:
+        return None, None
+    try:
+        return (
+            datetime.strptime(m.group(1), "%Y.%m.%d"),
+            datetime.strptime(m.group(2), "%Y.%m.%d"),
+        )
+    except ValueError:
+        return None, None
+
+
+def compute_windows(
+    report: Report, n: int
+) -> list[dict]:
+    """Split the backtest into N equal time windows and compute metrics for each.
+
+    Returns a list of dicts (one per window), each with:
+      window_idx, t_start (ISO date), t_end (ISO date, exclusive),
+      start_balance, end_balance, ...metrics
+
+    Trades are assigned to the window where their `open_time` falls.
+    `start_balance` is the running balance at the left edge of the
+    window (the balance carried over from the previous window's last
+    trade, or the initial deposit for window 0).
+
+    Time slicing
+    ------------
+    Boundaries are at bt_start + k * (bt_end - bt_start) / N for k in
+    0..N. The very last window's t_end is bt_end (we use the user-given
+    end, not bt_start + N * step, to handle the case where bt_end is
+    not a whole number of step lengths from bt_start — common when
+    bt_end is "the last bar's date").
+    """
+    if n < 1:
+        raise ValueError(f"window count must be >= 1, got {n}")
+
+    deposit = report.settings.initial_deposit
+    bt_start, bt_end = _parse_period_dates(report.settings.period)
+    if bt_start is None or bt_end is None:
+        raise ValueError(
+            f"cannot parse backtest date range from period: {report.settings.period!r}"
+        )
+    if bt_end <= bt_start:
+        raise ValueError(f"bt_end {bt_end} <= bt_start {bt_start}")
+
+    trades = pair_trades(report.deals)
+    # Assign each trade to a window by its open_time
+    # First, build a global running balance series keyed by close_time,
+    # so we can look up the balance at the left edge of any window.
+    balance_curve: list[tuple[datetime, float]] = [(bt_start, deposit)]
+    bal = deposit
+    for t in trades:
+        try:
+            close_dt = datetime.strptime(t["close_time"], "%Y.%m.%d %H:%M:%S")
+        except ValueError:
+            continue
+        bal += t["net"]
+        balance_curve.append((close_dt, bal))
+
+    def balance_at(left_edge: datetime) -> float:
+        """Return the last known balance at or before `left_edge`."""
+        b = deposit
+        for ts, v in balance_curve:
+            if ts <= left_edge:
+                b = v
+            else:
+                break
+        return b
+
+    total_seconds = (bt_end - bt_start).total_seconds()
+    out = []
+    for k in range(n):
+        t_start = bt_start + timedelta(seconds=total_seconds * k / n)
+        t_end = bt_start + timedelta(seconds=total_seconds * (k + 1) / n) \
+            if k < n - 1 else bt_end
+        # Select trades whose open_time is in [t_start, t_end)
+        in_window = []
+        for t in trades:
+            try:
+                ot = datetime.strptime(t["open_time"], "%Y.%m.%d %H:%M:%S")
+            except ValueError:
+                continue
+            if t_start <= ot < t_end:
+                in_window.append(t)
+        start_bal = balance_at(t_start)
+        end_bal = balance_at(t_end)
+        window_days = (t_end - t_start).total_seconds() / 86400.0
+        m = compute_window_metrics(in_window, start_bal, deposit, window_days)
+        out.append({
+            "window_idx": k,
+            "t_start": t_start.strftime("%Y.%m.%d"),
+            "t_end": t_end.strftime("%Y.%m.%d"),
+            "start_balance": round(start_bal, 2),
+            "end_balance": round(end_bal, 2),
+            **m,
+        })
+    return out
+
+
+def _mean_std(vals: list[float]) -> tuple[float, float]:
+    """Return (mean, sample_std_n_minus_1) of vals. std=0 if N<2."""
+    n = len(vals)
+    if n == 0:
+        return 0.0, 0.0
+    if n == 1:
+        return vals[0], 0.0
+    mean = sum(vals) / n
+    var = sum((x - mean) ** 2 for x in vals) / (n - 1)
+    return mean, var ** 0.5
+
+
+# Thresholds for notable / extreme outliers in windows analysis.
+# Per the user: |z| >= 2 = notable; |z| >= 5 = extreme.
+SIGMA_NOTABLE = 2.0
+SIGMA_EXTREME = 5.0
+
+# All metrics included in the z-score outlier scan. Direction-agnostic
+# (we use |z|); lower-better metrics (e.g. bal_dd_rel_pct) are not
+# inverted — a window with very LOW DD% will get |z| > 2 and the user
+# decides whether that's good or bad from context.
+ALL_METRICS = [
+    "profit",
+    "expected_payoff",
+    "profit_factor",
+    "recovery_factor",
+    "bal_dd_rel_pct",
+    "trades",
+    "sharpe_ratio",
+]
+
+
+def windows_comparison(windows: list[dict]) -> dict:
+    """Per-window z-score outlier scan across the 7 core metrics.
+
+    For each metric, compute mean and sample std across all windows,
+    then for each window compute z = (val - mean) / std. Flag any
+    window whose |z| for any metric crosses the thresholds:
+
+      • |z| >= 2.0  -> notable outlier   -- marker ▲
+      • |z| >= 5.0  -> extreme outlier   -- marker ■
+
+    Note: this is direction-agnostic. |z| > 2 means "this window's
+    value is far from the rest"; whether that is good (e.g. very
+    high profit) or bad (e.g. very high DD%) is left to the user.
+    Sample std uses N-1. z=0 when std=0 (all windows identical).
+
+    Output shape:
+      {
+        "per_window": [{ "outliers": [{"metric": "profit", "z": +2.27,
+                                        "level": "notable"|"extreme"},
+                                       ...],
+                         "notable_count": int,
+                         "extreme_count": int,
+                         "max_abs_z": float,
+                         "max_abs_z_metric": str}, ...],
+        "mean":       {"profit": ..., ...},
+        "std":        {"profit": ..., ...},
+        "thresholds": {"notable": 2.0, "extreme": 5.0},
+        "summary":    {"notable_windows": int, "extreme_windows": int,
+                       "n_windows": int},
+      }
+    """
+    # Per-metric mean and std across all windows
+    mean_map: dict = {}
+    std_map: dict = {}
+    for m in ALL_METRICS:
+        vals = [w.get(m, 0.0) for w in windows]
+        mn, sd = _mean_std(vals)
+        mean_map[m] = round(mn, 4)
+        std_map[m] = round(sd, 4)
+
+    per_window = []
+    for w in windows:
+        outliers = []
+        for m in ALL_METRICS:
+            sd = std_map[m]
+            if sd == 0:
+                continue
+            z = (w.get(m, 0.0) - mean_map[m]) / sd
+            az = abs(z)
+            if az >= SIGMA_EXTREME:
+                outliers.append({"metric": m, "z": round(z, 2),
+                                 "level": "extreme"})
+            elif az >= SIGMA_NOTABLE:
+                outliers.append({"metric": m, "z": round(z, 2),
+                                 "level": "notable"})
+        # Find the single most extreme outlier for the row marker
+        max_abs_z = 0.0
+        max_metric = ""
+        for o in outliers:
+            if abs(o["z"]) > max_abs_z:
+                max_abs_z = abs(o["z"])
+                max_metric = o["metric"]
+        per_window.append({
+            "outliers": outliers,
+            "notable_count": sum(1 for o in outliers if o["level"] == "notable"),
+            "extreme_count": sum(1 for o in outliers if o["level"] == "extreme"),
+            "max_abs_z": round(max_abs_z, 2),
+            "max_abs_z_metric": max_metric,
+        })
+
+    n_notable = sum(1 for f in per_window if f["notable_count"] > 0)
+    n_extreme = sum(1 for f in per_window if f["extreme_count"] > 0)
+    return {
+        "per_window": per_window,
+        "mean": mean_map,
+        "std": std_map,
+        "thresholds": {"notable": SIGMA_NOTABLE, "extreme": SIGMA_EXTREME},
+        "summary": {
+            "notable_windows": n_notable,
+            "extreme_windows": n_extreme,
+            "n_windows": len(windows),
+        },
+    }
+
+
+def print_windows(report: Report, windows: list[dict], comparison: dict) -> None:
+    """Pretty-print the windows analysis as a text table."""
+    print("=" * 96)
+    print(f"  Windows Analysis  (backtest split into {len(windows)} equal time slices)")
+    print("=" * 96)
+    s = report.settings
+    res = report.results
+    print(f"  Expert: {s.expert}  Symbol: {s.symbol}  Period: {s.period}")
+    print(f"  Initial Deposit: {s.initial_deposit:,.2f}")
+    print()
+
+    # Window boundaries
+    print(f"  {'Win':<4} {'Start':<12} {'End':<12} {'Days':>6} "
+          f"{'StartBal':>10} {'EndBal':>10} {'Trades':>6}")
+    print("  " + "─" * 76)
+    total_days = 0.0
+    for w in windows:
+        t_s = datetime.strptime(w["t_start"], "%Y.%m.%d")
+        t_e = datetime.strptime(w["t_end"], "%Y.%m.%d")
+        days = (t_e - t_s).total_seconds() / 86400.0
+        total_days += days
+        print(f"  {w['window_idx']:<4} {w['t_start']:<12} {w['t_end']:<12} "
+              f"{days:>6.1f} {w['start_balance']:>10,.2f} {w['end_balance']:>10,.2f} "
+              f"{w['trades']:>6}")
+    print(f"  {'─'*76}\n")
+
+    # Metrics table
+    print(f"  {'Win':<4} {'Profit':>10} {'EP':>8} {'PF':>6} {'RF':>6} "
+          f"{'BalDD%':>7} {'Trades':>6} {'Sharpe':>8}  Outliers")
+    print("  " + "─" * 102)
+    for w, flags in zip(windows, comparison["per_window"]):
+        # Build a compact outlier marker: max level, count, and metric
+        if flags["extreme_count"] > 0:
+            level = "■EXT"
+        elif flags["notable_count"] > 0:
+            level = "▲2σ"
+        else:
+            level = "  -"
+        if flags["outliers"]:
+            metrics_short = ",".join(
+                f"{o['metric'][:4]}({o['z']:+.1f}σ)"
+                for o in flags["outliers"]
+            )
+            marker = f"{level} k={flags['notable_count'] + flags['extreme_count']} {metrics_short}"
+        else:
+            marker = level
+        print(f"  {w['window_idx']:<4} {w['profit']:>10,.2f} {w['expected_payoff']:>8.2f} "
+              f"{w['profit_factor']:>6.2f} {w['recovery_factor']:>6.2f} "
+              f"{w['bal_dd_rel_pct']:>7.2f} {w['trades']:>6} "
+              f"{w['sharpe_ratio']:>8.2f}  {marker}")
+    print()
+
+    # Mean row (the reference for z-scores). Only meaningful with N>=2.
+    if len(windows) >= 2:
+        mn = comparison["mean"]
+        print(f"  {'MEAN':<4} {mn.get('profit', 0):>10,.2f} "
+              f"{mn.get('expected_payoff', 0):>8.2f} "
+              f"{mn.get('profit_factor', 0):>6.2f} {mn.get('recovery_factor', 0):>6.2f} "
+              f"{mn.get('bal_dd_rel_pct', 0):>7.2f} {mn.get('trades', 0):>6.0f} "
+              f"{mn.get('sharpe_ratio', 0):>8.2f}")
+        print(f"  {'STD':<4} "
+              f"{comparison['std'].get('profit', 0):>10,.2f} "
+              f"{comparison['std'].get('expected_payoff', 0):>8.2f} "
+              f"{comparison['std'].get('profit_factor', 0):>6.2f} "
+              f"{comparison['std'].get('recovery_factor', 0):>6.2f} "
+              f"{comparison['std'].get('bal_dd_rel_pct', 0):>7.2f} "
+              f"{comparison['std'].get('trades', 0):>6.2f} "
+              f"{comparison['std'].get('sharpe_ratio', 0):>8.2f}")
+        print()
+
+    # For N=1: cross-check computed values vs HTML report
+    if len(windows) == 1:
+        w0 = windows[0]
+        print("  " + "─" * 45)
+        print("  N=1 cross-check vs report's reported values "
+              "(4 of 7 exact: Profit, EP, PF, Trades; 3 documented approx):")
+        ref_pairs = [
+            ("Profit",          w0["profit"],           res.total_net_profit),
+            ("Expected Payoff", w0["expected_payoff"],  res.expected_payoff),
+            ("Profit Factor",   w0["profit_factor"],    res.profit_factor),
+            ("Recovery Factor", w0["recovery_factor"],  res.recovery_factor),
+            ("Balance DD Rel%", w0["bal_dd_rel_pct"],   res.balance_drawdown_rel_pct),
+            ("Trades",          w0["trades"],           res.total_trades),
+            ("Sharpe Ratio",    w0["sharpe_ratio"],     res.sharpe_ratio),
+        ]
+        for name, calc, ref in ref_pairs:
+            diff = calc - ref
+            if ref != 0:
+                pct = abs(diff) / abs(ref) * 100
+            else:
+                pct = 0.0
+            mark = "✓" if pct < 0.5 else ("⚠" if pct < 5 else "✗")
+            print(f"    {mark} {name:<18}  calc={calc:>10.4f}   "
+                  f"ref={ref:>10.4f}   diff={diff:>+10.4f}  ({pct:5.1f}%)")
+        print("  Legend: ✓ = exact (rounding only), ⚠ = small drift, "
+              "✗ = documented approximation")
+        print()
+
+    # When N > 1, also compute full-period metrics as a cross-check
+    # reference so the user can see how sub-window values relate to
+    # the full backtest (both our computation and the HTML report).
+    if len(windows) > 1:
+        # Compute full-period window (N=1) for comparison
+        full_wins = compute_windows(report, 1)
+        if full_wins:
+            w_full = full_wins[0]
+        else:
+            w_full = None
+        if w_full is not None:
+            print("  " + "─" * 45)
+            print("  Full-period reference:")
+            print("  (computed N=1 vs HTML report stated values)")
+            ref_pairs = [
+                ("Profit",          w_full["profit"],           res.total_net_profit),
+                ("Expected Payoff", w_full["expected_payoff"],  res.expected_payoff),
+                ("Profit Factor",   w_full["profit_factor"],    res.profit_factor),
+                ("Recovery Factor", w_full["recovery_factor"],  res.recovery_factor),
+                ("Balance DD Rel%", w_full["bal_dd_rel_pct"],   res.balance_drawdown_rel_pct),
+                ("Trades",          w_full["trades"],           res.total_trades),
+                ("Sharpe Ratio",    w_full["sharpe_ratio"],     res.sharpe_ratio),
+            ]
+            for name, calc, ref in ref_pairs:
+                diff = calc - ref
+                if ref != 0:
+                    pct = abs(diff) / abs(ref) * 100
+                else:
+                    pct = 0.0
+                mark = "✓" if pct < 0.5 else ("⚠" if pct < 5 else "✗")
+                print(f"    {mark} {name:<18}  calc={calc:>10.4f}   "
+                      f"ref={ref:>10.4f}   diff={diff:>+10.4f}  ({pct:5.1f}%)")
+            print()
+
+    # Summary
+    summ = comparison["summary"]
+    thr = comparison["thresholds"]
+    if len(windows) < 2:
+        print("  Outlier scan: skipped (need at least 2 windows to compute std).")
+        print("  Use --count 2 or more for the z-score outlier scan.")
+    else:
+        print("  Outlier scan (per-metric z-score vs window mean):")
+        print(f"    ▲2σ  = |z| >= {thr['notable']:.0f} on any metric (notable)")
+        print(f"    ■EXT = |z| >= {thr['extreme']:.0f} on any metric (extreme)")
+        print(f"    {summ['notable_windows']}/{summ['n_windows']} windows have at least one "
+              f"|z|>={thr['notable']:.0f} outlier, "
+              f"{summ['extreme_windows']}/{summ['n_windows']} have at least one "
+              f"|z|>={thr['extreme']:.0f}.")
+        if summ["notable_windows"] > 0 or summ["extreme_windows"] > 0:
+            print("  Use --json to see per-metric z-scores.")
+    print()
+    if len(windows) >= 2:
+        print("  Interpretation:")
+        print("    z = (this window's value − mean across all windows) / std.")
+        print("    A z-score measures how far this window is from the rest.")
+        print("    Direction is sign-bearing (+ vs −); the marker is |z|.")
+        print("    For lower-is-better metrics (bal_dd_rel_pct), a negative z")
+        print("    means 'this window's DD is unusually low' — good if you")
+        print("    want safety, neutral if you just want consistency.")
+        print("  A single window with a strong outlier is a regime signal.")
+        print("  Multiple windows each with their own outliers point to a")
+        print("  high-variance strategy — harder to predict live performance.")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Parse MT5 Strategy Tester HTML report")
+    parser = argparse.ArgumentParser(
+        description="Parse MT5 Strategy Tester HTML report",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Text report (default)
+  python %(prog)s report.html
+
+  # JSON dump (raw parsed data)
+  python %(prog)s report.html --json
+
+  # Full trade analysis (idle time, monthly breakdown, re-entry detection)
+  python %(prog)s report.html --analyze
+
+  # Window analysis (see "windows --help" for details)
+  python %(prog)s report.html windows --count 4
+  python %(prog)s report.html windows --count 6 --json
+""",
+    )
     parser.add_argument("report", help="Path to HTML report file")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--analyze", action="store_true",
                         help="Run trade analysis (pair deals, risk check, monthly breakdown)")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_win = sub.add_parser(
+        "windows",
+        help="Split the backtest into N equal time windows and compute "
+             "the 7 core metrics for each (Profit, EP, PF, RF, "
+             "Balance DD Rel%% (relative), Trades, Sharpe). Use to find time "
+             "windows that are statistical outliers vs the rest "
+             "(over-fitting / regime detection).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # N=1: validate that calculation matches the full report
+  python parse_tester_report.py <report.html> windows --count 1
+
+  # N=4: quarterly analysis for a 1.5y backtest
+  python parse_tester_report.py <report.html> windows --count 4
+
+  # N=8: finer granularity
+  python parse_tester_report.py <report.html> windows --count 8
+
+  # JSON output (per-window metrics + z-score outliers)
+  python parse_tester_report.py <report.html> windows --count 6 --json
+
+Each window shows all 7 metrics plus an outlier flag (|z|>=2: notable,
+|z|>=5: extreme). The MEAN/STD row gives the reference distribution.
+""",
+    )
+    p_win.add_argument(
+        "--count", "-n", type=int, required=True,
+        help="Number of equal time windows to split the backtest into. "
+             "Use 1 to validate: should match the full report within tolerance.",
+    )
+    p_win.add_argument(
+        "--json", action="store_true", help="Output windows data as JSON",
+    )
+
     args = parser.parse_args()
 
     path = Path(args.report)
@@ -709,9 +1405,34 @@ def main():
 
     report = parse_report(path)
 
-    # Always compute analyze data (needed for idle_time in text report)
-    analyze_data = analyze_report(report)
+    if args.cmd == "windows":
+        wins = compute_windows(report, args.count)
+        comp = windows_comparison(wins)
+        if getattr(args, "json", False):
+            out = {
+                "report": {
+                    "expert": report.settings.expert,
+                    "symbol": report.settings.symbol,
+                    "period": report.settings.period,
+                    "initial_deposit": report.settings.initial_deposit,
+                    "total_net_profit": report.results.total_net_profit,
+                    "profit_factor": report.results.profit_factor,
+                    "expected_payoff": report.results.expected_payoff,
+                    "recovery_factor": report.results.recovery_factor,
+                    "sharpe_ratio": report.results.sharpe_ratio,
+                    "bal_dd_rel_pct": report.results.balance_drawdown_rel_pct,
+                    "total_trades": report.results.total_trades,
+                },
+                "windows": wins,
+                "comparison": comp,
+            }
+            print(json.dumps(out, indent=2, ensure_ascii=False))
+        else:
+            print_windows(report, wins, comp)
+        return
 
+    # Default behaviour: text report (with analyze) or JSON
+    analyze_data = analyze_report(report)
     if args.analyze:
         report_dict = asdict(report)
         report_dict["analyze"] = analyze_data

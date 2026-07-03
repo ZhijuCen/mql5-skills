@@ -213,10 +213,10 @@ def run_tests(
         sl_buy = round(bid - sl_dist_price, spec.digits)
         loss_buy = calc_profit(spec, lots, bid, sl_buy)
 
-        print(f"    SL距离={sl_distance_pts:>5} pts  "
-              f"→ 价格距离={sl_dist_price}  "
+        print(f"    SL dist={sl_distance_pts:>5} pts  "
+              f"-> price dist={sl_dist_price}  "
               f"BUY SL={fmt(sl_buy, spec.digits)}  "
-              f"亏损={fmt(loss_buy, spec.digits)} {pc}")
+              f"loss={fmt(loss_buy, spec.digits)} {pc}")
 
     # Also verify with Ask = Bid + spread
     spread_pts = 12 if spec.name == "XAUUSD" else 3
@@ -239,9 +239,9 @@ def run_tests(
 
             print(f"    Risk={risk_pct}% {direction:4s}  "
                   f"SL={fmt(sl, spec.digits)}  "
-                  f"目标亏损={fmt(ml, 2)} {pc}  "
-                  f"实际亏损={fmt(actual_loss, 2)} {pc}  "
-                  f"差={fmt(abs(actual_loss) - ml, 6)}")
+                  f"target loss={fmt(ml, 2)} {pc}  "
+                  f"actual loss={fmt(actual_loss, 2)} {pc}  "
+                  f"diff={fmt(abs(actual_loss) - ml, 6)}")
     print()
 
     # ─────────────────────────────────────────────────────────────────
@@ -261,11 +261,11 @@ def run_tests(
         else:
             actual_loss = 0.0
 
-        print(f"    SL距离={sl_distance_pts:>5} pts  "
+        print(f"    SL dist={sl_distance_pts:>5} pts  "
               f"SL={fmt(sl_buy, spec.digits)}  "
-              f"计算手数={lots_calc:.4f}  "
-              f"实际亏损={fmt(actual_loss, 2)} {pc}  "
-              f"差={fmt(abs(actual_loss) - ml, 6)}")
+              f"lots calc={lots_calc:.4f}  "
+              f"actual loss={fmt(actual_loss, 2)} {pc}  "
+              f"diff={fmt(abs(actual_loss) - ml, 6)}")
     print()
 
     # ─────────────────────────────────────────────────────────────────
@@ -295,7 +295,7 @@ def run_tests(
         # Reverse loss check
         loss_rev = calc_profit(spec, lots_rev, bid, sl_buy)
 
-        print(f"    Risk={risk_pct}% SL距离={sl_pts}pts  budget={fmt(ml, 2)} {pc}")
+        print(f"    Risk={risk_pct}% SL dist={sl_pts}pts  budget={fmt(ml, 2)} {pc}")
         print(f"      Forward:  SL={fmt(sl_fwd, spec.digits)}  lots={lots_fwd:.2f}  "
               f"loss={fmt(loss_fwd, 2)} {pc} (budget={fmt(ml, 2)})")
         print(f"      Reverse:  lots={lots_rev:.4f}  "
@@ -358,7 +358,7 @@ def main():
     print(f"  Step 2: convert to JPY     = {fmt(target_usd, 2)} × {jpy_rate} = {fmt(target_jpy, 2)} JPY")
     print(f"  Step 3: points = budget / (PointValue × Lots)")
     print(f"          = {fmt(target_jpy, 2)} / ({point_value(jpy_spec):.1f} × {lots}) = {target_jpy / (point_value(jpy_spec) * lots):.1f} pts")
-    print(f"          SL距离 = {target_jpy / (point_value(jpy_spec) * lots):.1f} × {jpy_spec.point} = "
+    print(f"          SL dist = {target_jpy / (point_value(jpy_spec) * lots):.1f} x {jpy_spec.point} = "
           f"{target_jpy / (point_value(jpy_spec) * lots) * jpy_spec.point:.4f} price")
     print(f"          SL = {bids['USDJPY']} - {target_jpy / (point_value(jpy_spec) * lots) * jpy_spec.point:.4f} = "
           f"{fmt(sl_fwd, jpy_spec.digits)}")
@@ -367,8 +367,8 @@ def main():
     print(f"  Step 5: loss in USD = {fmt(loss_jpy, 2)} / {jpy_rate} = {fmt(loss_usd, 2)} USD")
     print()
     print(f"  Result: target {fmt(target_usd, 2)} USD ≈ actual {fmt(loss_usd, 2)} USD  "
-          f"(差={fmt(abs(loss_usd) - target_usd, 4)} USD, "
-          f"来自 NormalizeDouble 四舍五入)")
+          f"(diff={fmt(abs(loss_usd) - target_usd, 4)} USD, "
+          f"from NormalizeDouble rounding)")
     print()
 
     # ─────────────────────────────────────────────────────────────────
@@ -390,10 +390,10 @@ def main():
         actual_loss = calc_profit(xau, lots, bids["XAUUSD"], sl)
 
         print(f"    Lots={lots:>5.2f}  "
-              f"SL距离={sl_dist_pts:>6} pts ({sl_dist_price:.2f} price)  "
+              f"SL dist={sl_dist_pts:>6} pts ({sl_dist_price:.2f} price)  "
               f"SL={fmt(sl, xau.digits)}  "
-              f"亏损={fmt(actual_loss, 2)} USD  "
-              f"差={fmt(abs(actual_loss) - ml_usd, 6)}")
+              f"loss={fmt(actual_loss, 2)} USD  "
+              f"diff={fmt(abs(actual_loss) - ml_usd, 6)}")
 
 
 if __name__ == "__main__":
