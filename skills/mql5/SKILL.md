@@ -838,13 +838,24 @@ Optimization exports a different artifact: a single-worksheet XML-tagged
 Excel workbook (`ReportOptimizer-*.xml`, also openable in LibreOffice Calc).
 Each row is one parameter pass; the first worksheet name is
 `Tester Optimizator Results`. Use `scripts/parse_optimizer_report.py` to
-extract and analyze it. The script has three modes:
+extract and analyze it. Top-level modes:
 
 ```bash
 python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml
 python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml --json
 python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml --analyze
 ```
+
+Plus a subcommand:
+
+```bash
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers [--sigma 2] [--top-outliers 10] [--top-normal 5] [--json]
+```
+
+The `outliers` subcommand does a per-pass z-score scan on the 8
+performance metrics and splits passes into "strongly-strong" (Set A,
+at least one metric `|z| >= σ` in the favourable direction) vs
+"no-outlier" (Set B), sorted by `Result` desc. See §10 below.
 
 The `Title` field in `<DocumentProperties>` encodes the strategy
 environment on one line: `<EA> <SYMBOL>,<PERIOD> <YYYY.MM.DD>-<YYYY.MM.DD>`.
@@ -981,6 +992,86 @@ Skip the "best PF" and "best recovery factor" sections only when they
 identify the same pass as "best profit" — otherwise the disagreement is
 the most interesting finding (it means there's a regime-specific trade-off
 you should investigate, not average away).
+
+#### 10. Per-Pass Outlier Scan
+
+`--analyze` tells you which **parameter ranges** win and which are dead,
+but it doesn't tell you which **individual passes** are statistical
+outliers — passes so far above (or, for DD, so far below) the run's
+own mean that they deserve separate scrutiny. The `outliers`
+subcommand does this with a per-metric z-score scan over the 8
+performance metrics.
+
+```
+# Default: σ=2.0, top 10 outlier passes, top 5 normal passes
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers
+
+# Tighter threshold + custom top-N
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers --sigma 2.5 --top-outliers 5
+
+# JSON for further processing
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers --json
+```
+
+**The 8 performance metrics scanned** are everything in `METRIC_COLS`
+except `Trades`: `Result`, `Profit`, `Expected Payoff`, `Profit Factor`,
+`Recovery Factor`, `Sharpe Ratio`, `Custom`, `Equity DD %`. `Trades` is
+explicitly excluded from the metric scan and used only as an exclusion
+filter (see below).
+
+**Direction conventions** — per-metric outlier criterion:
+- **Higher-is-better** (`Result`, `Profit`, `Expected Payoff`,
+  `Profit Factor`, `Recovery Factor`, `Sharpe Ratio`, `Custom`):
+  outlier = `z >= +σ`
+- **Lower-is-better** (`Equity DD %`): outlier = `z <= -σ` (low DD is
+  good; high DD is bad but is not a "strong" outlier — those passes
+  are simply average)
+
+**Two disjoint sets** (both sorted by `Result` desc, both excluding
+low-Trades passes):
+
+- **Set A — passes with at least one perf-metric outlier.** These are
+  candidates for closer inspection: a pass posting `z > +2` on Profit
+  *and* `z > +2` on Sharpe together is genuinely exceptional; a pass
+  posting `z > +2` on Profit alone with everything else flat is more
+  likely a fluke of small-sample variance.
+- **Set B — passes with no perf-metric outlier** (top M by Result).
+  The "next-tier" passes — strong but unremarkable relative to the
+  rest of the run. Use these when Set A is too small to draw
+  conclusions.
+
+**Low-Trades exclusion** — passes with `Trades z <= -σ` (too few
+trades to trust) are dropped before either set is built. They are
+listed separately in the output so you can see what was filtered.
+
+**Reference table** — the output header prints `mean`, `std`, and
+`±σ threshold` for every metric so you can judge whether the outlier
+count is meaningful. A run with `Profit std` tiny relative to `mean`
+will have many `z > +2` candidates because the threshold is near the
+mean; a run with `Profit std` large (high EA variance) will have few.
+Always read the std row before trusting the count.
+
+**Sigma choice** — `σ=2.0` is the default. For runs with hundreds of
+passes that's strict enough to be useful (~5% of values expected to
+clear it under a normal distribution, concentrated at the extremes).
+For runs with <100 passes, drop to `σ=1.5` if Set A is empty;
+`σ=3.0` is appropriate only for runs with >1000 passes (then
+`z > 3` outliers are real signal, not tails).
+
+**Generic column typing** — `parse_optimizer_report.py` does not
+hardcode input-parameter names. Two techniques that make the script
+EA-agnostic:
+- **Type inference** comes from the SpreadsheetML header: a body cell
+  with `<Data ss:Type="String">` stays as a string column (e.g.
+  boolean Inp* rendered as `"true"`/`"false"`); numeric cells become
+  `float64` (or `Int64` when every value is whole). No `Inp*` name
+  is ever referenced.
+- **Input-parameter detection** uses column position, not name
+  prefix: `Trades` is the last fixed column; every column after it is
+  an optimization input parameter regardless of whether its name
+  starts with `Inp`. So an EA that names parameters `StopLoss`,
+  `TakeProfit`, `UseNewsFilter` is parsed correctly without any
+  script changes.
 
 ## 7. Event Handlers Reference
 

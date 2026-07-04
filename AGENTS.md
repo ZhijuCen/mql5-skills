@@ -207,6 +207,48 @@ Use alongside `parse_tester_report.py` for the same EA: the latter
 explains *why* a specific pass performs, the former explains *which*
 pass performs and *which* parameters are even worth tuning.
 
+#### `outliers` subcommand
+
+Per-pass z-score scan over the 8 performance metrics
+(Result, Profit, Expected Payoff, Profit Factor, Recovery Factor,
+Sharpe Ratio, Custom, Equity DD %). Two disjoint sets:
+
+- **Set A** — passes with AT LEAST ONE performance metric crossing
+  ±σ in the favourable direction (higher-is-better metrics: z >= +σ;
+  Equity DD % uses z <= -σ because low DD is good). Sorted by
+  `Result` desc, top `--top-outliers` (default 10) shown.
+- **Set B** — passes with NO performance-metric outlier. Sorted by
+  `Result` desc, top `--top-normal` (default 5) shown.
+
+Both sets EXCLUDE passes whose `Trades` count is itself a low-side
+outlier (z <= -σ) — those have too few trades to trust, and the
+excluded list is shown separately.
+
+Output: header card + per-metric reference table (mean, std, ±σ
+threshold) + Set A records (each split into Metrics group and Params
+group, with the outlier σ values annotated) + Set B records + the
+Excluded list.
+
+```
+# Default (σ=2, top 10 outliers, top 5 normal)
+python skills/mql5/scripts/parse_optimizer_report.py report.xml outliers
+
+# Tighter threshold + custom counts
+python skills/mql5/scripts/parse_optimizer_report.py report.xml outliers --sigma 2.5 --top-outliers 5 --top-normal 3
+
+# JSON output for further processing
+python skills/mql5/scripts/parse_optimizer_report.py report.xml outliers --json
+```
+
+**EA-agnostic by design**: the script does not hardcode any input
+parameter name. Type inference reads `<Data ss:Type="String">` from
+the SpreadsheetML header (boolean Inp* rendered as "true"/"false"
+stays a string; everything else is numeric). Input parameters are
+detected by **column position** — every column after `Trades` is an
+optimization input, regardless of whether its name starts with
+`Inp`. So an EA naming its params `StopLoss` / `TakeProfit` /
+`UseNewsFilter` parses correctly without script changes.
+
 ### mql5_helper.py
 
 MT5 development helper for compile/deploy/status via Wine:
