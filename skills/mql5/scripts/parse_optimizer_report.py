@@ -26,7 +26,7 @@ Usage:
     python skills/mql5/scripts/parse_optimizer_report.py <report.xml>
     python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --json
     python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --analyze
-    python skills/mql5/scripts/parse_optimizer_report.py <report.xml> outliers [--top-outliers N] [--top-normal M] [--sigma K] [--json]
+    python skills/mql5/scripts/parse_optimizer_report.py <report.xml> outliers [--top-outliers N] [--top-normal M] [--sigma K] [--sort ABBR_LIST] [--json]
 """
 
 from __future__ import annotations
@@ -80,6 +80,34 @@ METRIC_COLS = [
 ]
 # Heuristic: every column that is not "Inp*" and not "Pass" is a metric.
 # InpUseNewsFilter is a boolean string, all other Inp* are numbers.
+
+# ── Sort abbreviations (for the `outliers` --sort / --priority argument) ──
+
+# Abbreviation → full metric name lookup for the --sort argument.
+_SORT_ABBR_TO_FULL = {
+    "R": "Result",
+    "P": "Profit",
+    "EP": "Expected Payoff",
+    "PF": "Profit Factor",
+    "RF": "Recovery Factor",
+    "SR": "Sharpe Ratio",
+    "C": "Custom",
+    "DD": "Equity DD %",
+    "T": "Trades",
+}
+
+# Sort direction: True = ascending, False = descending.
+# Result / Profit / Expected Payoff / Profit Factor / Recovery Factor /
+# Sharpe Ratio / Custom / Trades all descend (higher-is-better).
+# Equity DD % ascends (lower drawdown is better).
+_SORT_ASCENDING: set[str] = {"Equity DD %"}
+
+# Default sort priority (used when --sort is omitted).
+_DEFAULT_SORT_PRIORITY: list[str] = [
+    "Result", "Expected Payoff", "Profit Factor",
+    "Recovery Factor", "Sharpe Ratio", "Profit",
+    "Equity DD %", "Custom", "Trades",
+]
 
 
 # ── Parsing ──────────────────────────────────────────────────────────
@@ -487,11 +515,85 @@ def _outlier_metrics_for_row(
     return flags
 
 
+def _parse_sort_priority(expr: str | None) -> list[str]:
+    """Parse --sort expression into ordered list of full metric names.
+
+    Each comma-separated token is an abbreviation from _SORT_ABBR_TO_FULL.
+    Unmentioned metrics are appended at the end in _DEFAULT_SORT_PRIORITY order.
+
+    Examples:
+      "EP,RF,R,P"  -> Expected Payoff, Recovery Factor, Result, Profit, ...
+      "EP"          -> Expected Payoff, Result, Profit Factor, ...
+      None          -> _DEFAULT_SORT_PRIORITY (full 9-metric chain)
+    """
+    if not expr:
+        return list(_DEFAULT_SORT_PRIORITY)
+
+    mentioned: list[str] = []
+    for token in expr.split(","):
+        token = token.strip().upper()
+        if token in _SORT_ABBR_TO_FULL:
+            mentioned.append(_SORT_ABBR_TO_FULL[token])
+        else:
+            print(
+                f"Warning: unknown sort abbreviation '{token}', ignoring",
+                file=sys.stderr,
+            )
+
+    seen = set(mentioned)
+    for m in _DEFAULT_SORT_PRIORITY:
+        if m not in seen:
+            mentioned.append(m)
+    return mentioned
+
+
+def _sort_key(rec: dict, priority: list[str]) -> tuple:
+    """Multi-key sort key for a pass record.
+
+    Each metric in ``priority`` contributes one sort level. The returned
+    flat tuple feeds Python's stable ``list.sort()``.
+
+    None values sort after all present values (sentinel ``(1, 0.0)``
+    vs ``(0, signed_value)``).
+
+    Parameters
+    ----------
+    rec : dict
+        A pass record with ``Result``, ``Trades`` (top-level keys) and
+        ``perf_metrics`` (inner dict for the remaining metrics).
+    priority : list[str]
+        Ordered list of full metric names (output of _parse_sort_priority).
+
+    Returns
+    -------
+    tuple
+        Flat tuple suitable for use as ``key`` in ``sorted()``.
+        Each level is ``(is_none, signed_value)``.
+    """
+    parts: list[tuple[int, float]] = []
+    for name in priority:
+        if name == "Trades":
+            v = rec.get("Trades")
+        elif name == "Result":
+            v = rec.get("Result")
+        else:
+            v = rec.get("perf_metrics", {}).get(name)
+
+        asc = name not in _SORT_ASCENDING  # everything desc except DD
+        if v is None:
+            parts.append((1, 0.0))  # push to the very end
+        else:
+            # desc -> negative value; asc -> positive value
+            parts.append((0, v if asc else -v))
+    return tuple(parts)
+
+
 def find_outliers(
     df: pd.DataFrame,
     sigma: float = 2.0,
     top_outliers: int = 10,
     top_normal: int = 5,
+    sort_priority: list[str] | None = None,
 ) -> dict:
     """Per-pass z-score outlier scan across the 8 performance metrics.
 
@@ -500,10 +602,10 @@ def find_outliers(
       set_outliers — passes with AT LEAST ONE performance metric whose
         z-score crosses ±sigma in the "strongly-strong" direction
         (higher-is-better: z >= +sigma; lower-is-better Equity DD %:
-        z <= -sigma). Sorted by Result desc; top `top_outliers` shown.
+        z <= -sigma). Sorted by ``sort_priority``; top ``top_outliers`` shown.
 
       set_normal — passes with NO performance-metric outlier. Sorted by
-        Result desc; top `top_normal` shown.
+        ``sort_priority``; top ``top_normal`` shown.
 
     Both sets EXCLUDE passes whose Trades count is itself a low-side
     outlier (z <= -sigma). Such passes have too few trades to trust
@@ -513,22 +615,28 @@ def find_outliers(
     Also returns the per-metric mean / std / sigma threshold table so
     the user can judge whether the outlier counts are meaningful.
 
-    Output shape:
-      {
-        "per_metric":  {"profit": {"mean":..., "std":..., "threshold_+sigma":...,
-                                    "threshold_-sigma":..., "direction": "higher"|"lower"},
-                         ...},
-        "trades":      {"mean":..., "std":..., "low_outlier_z": ...},
-        "sigma":       float,
-        "n_passes":    int,
-        "excluded":    [{"Pass":..., "Trades":..., "z": ...}, ...],  # low-Trades outliers
-        "set_outliers":[{Pass, Result, profit, ..., outliers: [{metric, z}, ...],
-                         params: {InpSLPips: ..., ...}}, ...],
-        "set_normal":  [...],
-        "counts":      {"outliers": int, "normal": int, "excluded": int},
-      }
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Parsed optimization report.
+    sigma : float
+        z-score threshold for outlier detection (default 2.0).
+    top_outliers : int
+        Max passes to return in set_outliers (default 10).
+    top_normal : int
+        Max passes to return in set_normal (default 5).
+    sort_priority : list[str] | None
+        Ordered list of full metric names for the multi-key sort.
+        None (= default) uses ``_DEFAULT_SORT_PRIORITY``.
+
+    Returns
+    -------
+    dict
+        See output shape below.
     """
-    out: dict = {"sigma": sigma, "n_passes": int(len(df))}
+    if sort_priority is None:
+        sort_priority = _parse_sort_priority(None)
+    out: dict = {"sigma": sigma, "n_passes": int(len(df)), "sort_priority": list(sort_priority)}
 
     if df.empty:
         out["error"] = "No pass rows"
@@ -596,8 +704,8 @@ def find_outliers(
         for r in excluded
     ]
 
-    # Sort eligible passes by Result desc
-    eligible.sort(key=lambda r: (r["Result"] is None, -(r["Result"] or 0.0)))
+    # Sort eligible passes by the configured priority chain
+    eligible.sort(key=lambda r: _sort_key(r, sort_priority))
 
     # Set A: at least one performance-metric outlier
     set_a = [r for r in eligible if r["outliers"]]
@@ -687,6 +795,22 @@ def _fmt_outlier_row(rec: dict, pcols: list[str]) -> str:
     return "\n".join(out_bits)
 
 
+def _fmt_sort_priority(priority: list[str]) -> str:
+    """Compact sort-priority string for display.
+
+    Example output: ``R↓, EP↓, PF↓, RF↓, …``
+    """
+    rev_lookup = {full: abbr for abbr, full in _SORT_ABBR_TO_FULL.items()}
+    parts: list[str] = []
+    for name in priority:
+        abbr = rev_lookup.get(name, name)
+        arrow = "↑" if name in _SORT_ASCENDING else "↓"
+        parts.append(f"{abbr}{arrow}")
+    if len(parts) > 5:
+        parts = parts[:5] + ["…"]
+    return ", ".join(parts)
+
+
 def print_outliers(env: Env, df: pd.DataFrame, out: dict) -> None:
     """Pretty-print the outlier scan as a text report.
 
@@ -728,8 +852,11 @@ def print_outliers(env: Env, df: pd.DataFrame, out: dict) -> None:
 
     # Counts
     c = out["counts"]
-    print(f"  Set A (>=1 perf outlier, sorted by Result desc): {c['outliers']} passes")
-    print(f"  Set B (no perf outlier,   sorted by Result desc): {c['normal']} passes")
+    sort_priority = out.get("sort_priority", list(_DEFAULT_SORT_PRIORITY))
+    sort_fmt = _fmt_sort_priority(sort_priority)
+    print(f"  Sort priority: {sort_fmt}")
+    print(f"  Set A (>=1 perf outlier): {c['outliers']} passes")
+    print(f"  Set B (no perf outlier):   {c['normal']} passes")
     if c["excluded_low_trades"]:
         print(f"  Excluded (Trades z<=-σ, too few trades to trust): {c['excluded_low_trades']} passes")
     print()
@@ -740,8 +867,8 @@ def print_outliers(env: Env, df: pd.DataFrame, out: dict) -> None:
     if out["set_outliers"]:
         print("=" * 78)
         print(f"  SET A — Passes with at least one performance-metric outlier")
-        print(f"          (top {len(out['set_outliers'])} by Result; "
-              f"{c['outliers']} total eligible)")
+        print(f"          (top {len(out['set_outliers'])}; "
+              f"sort: {sort_fmt}; {c['outliers']} total eligible)")
         print("=" * 78)
         for rec in out["set_outliers"]:
             print(_fmt_outlier_row(rec, pcols))
@@ -753,7 +880,8 @@ def print_outliers(env: Env, df: pd.DataFrame, out: dict) -> None:
     # Set B
     if out["set_normal"]:
         print("=" * 78)
-        print(f"  SET B — Passes with no performance-metric outlier (top {len(out['set_normal'])} by Result)")
+        print(f"  SET B — Passes with no performance-metric outlier "
+              f"(top {len(out['set_normal'])}; sort: {sort_fmt})")
         print("=" * 78)
         for rec in out["set_normal"]:
             print(_fmt_outlier_row(rec, pcols))
@@ -998,13 +1126,20 @@ Examples:
         "outliers",
         help="Per-pass z-score outlier scan on the 8 performance metrics. "
              "Splits passes into a 'strongly-strong' set (at least one metric with |z|>=σ "
-             "in the favourable direction) and a 'no-outlier' set, both sorted by Result "
-             "desc and printed with the metrics group + the input-parameter group.",
+             "in the favourable direction) and a 'no-outlier' set, both sorted by the "
+             "configured priority (default: R↓, EP↓, PF↓, RF↓, …) and printed with the "
+             "metrics group + the input-parameter group.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Default: sigma=2, top 10 outlier passes, top 5 normal passes
   python parse_optimizer_report.py ReportOptimizer-*.xml outliers
+
+  # Custom sort: priority by EP, then RF, then R, then P; rest in default order
+  python parse_optimizer_report.py ReportOptimizer-*.xml outliers --sort EP,RF,R,P
+
+  # Single priority metric; all others follow in default order
+  python parse_optimizer_report.py ReportOptimizer-*.xml outliers --sort EP
 
   # Tighter sigma threshold and custom top-N
   python parse_optimizer_report.py ReportOptimizer-*.xml outliers --sigma 3 --top-outliers 5
@@ -1017,6 +1152,12 @@ Sharpe Ratio, Expected Payoff, Custom, Result), an outlier is z >= +σ.
 For lower-is-better (Equity DD %), an outlier is z <= -σ. Passes whose
 Trades count is itself a low-side outlier (z <= -σ) are excluded
 first — they have too few trades to trust.
+
+Sort abbreviations (for --sort):
+  R=Result  P=Profit  EP=Expected Payoff  PF=Profit Factor  RF=Recovery Factor
+  SR=Sharpe Ratio  C=Custom  DD=Equity DD %  T=Trades
+  Default priority: R↓, EP↓, PF↓, RF↓, SR↓, P↓, DD↑, C↓, T↓
+  (↓ = descending, ↑ = ascending; Equity DD % ascends — lower is better)
 """,
     )
     p_out.add_argument(
@@ -1030,6 +1171,14 @@ first — they have too few trades to trust.
     p_out.add_argument(
         "--top-normal", type=int, default=5,
         help="Number of passes to show from the 'no outlier' set (default: 5)",
+    )
+    p_out.add_argument(
+        "--sort", type=str, default=None,
+        help="Comma-separated sort priority using metric abbreviations "
+             "(e.g. 'EP,RF,R,P'). Default: full chain R↓,EP↓,PF↓,RF↓,SR↓,P↓,DD↑,C↓,T↓. "
+             "Unmentioned metrics append in default order. "
+             "Abbreviations: R=Result P=Profit EP=Expected Payoff PF=Profit Factor "
+             "RF=Recovery Factor SR=Sharpe Ratio C=Custom DD=Equity DD %% T=Trades",
     )
     p_out.add_argument(
         "--json", action="store_true", help="Output outliers data as JSON",
@@ -1051,6 +1200,7 @@ first — they have too few trades to trust.
             sigma=args.sigma,
             top_outliers=args.top_outliers,
             top_normal=args.top_normal,
+            sort_priority=_parse_sort_priority(args.sort),
         )
         if getattr(args, "json", False):
             payload = {

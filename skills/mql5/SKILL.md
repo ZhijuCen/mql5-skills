@@ -849,13 +849,16 @@ python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml --ana
 Plus a subcommand:
 
 ```bash
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers [--sigma 2] [--top-outliers 10] [--top-normal 5] [--json]
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers [--sigma 2] [--top-outliers 10] [--top-normal 5] [--sort ABBR_LIST] [--json]
 ```
 
 The `outliers` subcommand does a per-pass z-score scan on the 8
 performance metrics and splits passes into "strongly-strong" (Set A,
 at least one metric `|z| >= σ` in the favourable direction) vs
-"no-outlier" (Set B), sorted by `Result` desc. See §10 below.
+"no-outlier" (Set B), sorted by a configurable priority chain.
+Default: `R↓, EP↓, PF↓, RF↓, SR↓, P↓, DD↑, C↓, T↓` (≈ by `Result`,
+then `Expected Payoff`, … `Trades`; `↓` = descending, `↑` = ascending).
+See §10 below.
 
 The `Title` field in `<DocumentProperties>` encodes the strategy
 environment on one line: `<EA> <SYMBOL>,<PERIOD> <YYYY.MM.DD>-<YYYY.MM.DD>`.
@@ -1006,6 +1009,12 @@ performance metrics.
 # Default: σ=2.0, top 10 outlier passes, top 5 normal passes
 python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers
 
+# Custom sort: priority by ExpectedPayoff, RecoveryFactor, Result, Profit
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers --sort EP,RF,R,P
+
+# Single priority metric; rest in default order
+python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers --sort DD
+
 # Tighter threshold + custom top-N
 python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers --sigma 2.5 --top-outliers 5
 
@@ -1027,8 +1036,36 @@ filter (see below).
   good; high DD is bad but is not a "strong" outlier — those passes
   are simply average)
 
-**Two disjoint sets** (both sorted by `Result` desc, both excluding
-low-Trades passes):
+**Sort priority (`--sort`)** — control the ranking of passes within
+Set A and Set B. Default priority (in abbreviation form):
+
+```
+R↓, EP↓, PF↓, RF↓, SR↓, P↓, DD↑, C↓, T↓
+```
+
+Abbreviations:
+| Code | Full metric        | Direction |
+|------|--------------------|-----------|
+| R    | Result             | ↓ (desc)  |
+| P    | Profit             | ↓ (desc)  |
+| EP   | Expected Payoff    | ↓ (desc)  |
+| PF   | Profit Factor      | ↓ (desc)  |
+| RF   | Recovery Factor    | ↓ (desc)  |
+| SR   | Sharpe Ratio       | ↓ (desc)  |
+| C    | Custom             | ↓ (desc)  |
+| DD   | Equity DD %        | ↑ (asc)   |
+| T    | Trades             | ↓ (desc)  |
+
+`DD↑` sorts ascending (lower drawdown first, because lower-is-better).
+All other metrics sort descending (higher values first). Supply a
+comma-separated list of abbreviations to reorder — e.g.
+`--sort EP,RF,R,P` puts Expected Payoff first, then Recovery Factor,
+then Result, then Profit, with the remaining metrics (`PF, SR, DD, C, T`)
+appended in their default order at the end. Unmentioned abbreviations
+are automatically appended in their default positional order.
+
+**Two disjoint sets** (both sorted by the configured priority, both
+excluding low-Trades passes):
 
 - **Set A — passes with at least one perf-metric outlier.** These are
   candidates for closer inspection: a pass posting `z > +2` on Profit

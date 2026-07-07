@@ -185,6 +185,7 @@ to `parse_tester_report.py`; same three output modes:
 python skills/mql5/scripts/parse_optimizer_report.py <ReportOptimizer-*.xml>
 python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --json
 python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --analyze
+python skills/mql5/scripts/parse_optimizer_report.py <report.xml> outliers [--sigma K] [--top-outliers N] [--top-normal M] [--sort ABBR_LIST] [--json]
 ```
 
 Reads `<DocumentProperties>` for the strategy environment card
@@ -216,22 +217,29 @@ Sharpe Ratio, Custom, Equity DD %). Two disjoint sets:
 - **Set A** — passes with AT LEAST ONE performance metric crossing
   ±σ in the favourable direction (higher-is-better metrics: z >= +σ;
   Equity DD % uses z <= -σ because low DD is good). Sorted by
-  `Result` desc, top `--top-outliers` (default 10) shown.
+  the configured priority chain (default: `R↓, EP↓, PF↓, RF↓, SR↓, …`),
+  top `--top-outliers` (default 10) shown.
 - **Set B** — passes with NO performance-metric outlier. Sorted by
-  `Result` desc, top `--top-normal` (default 5) shown.
+  the same priority chain, top `--top-normal` (default 5) shown.
 
 Both sets EXCLUDE passes whose `Trades` count is itself a low-side
 outlier (z <= -σ) — those have too few trades to trust, and the
 excluded list is shown separately.
 
-Output: header card + per-metric reference table (mean, std, ±σ
-threshold) + Set A records (each split into Metrics group and Params
-group, with the outlier σ values annotated) + Set B records + the
-Excluded list.
+Output: header card (includes `Sort priority: …` line) + per-metric
+reference table (mean, std, ±σ threshold) + Set A records (each split
+into Metrics group and Params group, with the outlier σ values
+annotated) + Set B records + the Excluded list.
 
 ```
 # Default (σ=2, top 10 outliers, top 5 normal)
 python skills/mql5/scripts/parse_optimizer_report.py report.xml outliers
+
+# Custom sort priority (abbreviations: R P EP PF RF SR C DD T)
+python skills/mql5/scripts/parse_optimizer_report.py report.xml outliers --sort EP,RF,R,P
+
+# Single priority metric; rest in default order
+python skills/mql5/scripts/parse_optimizer_report.py report.xml outliers --sort DD
 
 # Tighter threshold + custom counts
 python skills/mql5/scripts/parse_optimizer_report.py report.xml outliers --sigma 2.5 --top-outliers 5 --top-normal 3
@@ -239,6 +247,25 @@ python skills/mql5/scripts/parse_optimizer_report.py report.xml outliers --sigma
 # JSON output for further processing
 python skills/mql5/scripts/parse_optimizer_report.py report.xml outliers --json
 ```
+
+**Sort abbreviations:**
+| Code | Full metric        | Direction |
+|------|--------------------|-----------|
+| R    | Result             | ↓ (desc)  |
+| P    | Profit             | ↓ (desc)  |
+| EP   | Expected Payoff    | ↓ (desc)  |
+| PF   | Profit Factor      | ↓ (desc)  |
+| RF   | Recovery Factor    | ↓ (desc)  |
+| SR   | Sharpe Ratio       | ↓ (desc)  |
+| C    | Custom             | ↓ (desc)  |
+| DD   | Equity DD %        | ↑ (asc)   |
+| T    | Trades             | ↓ (desc)  |
+
+Default order: `R↓, EP↓, PF↓, RF↓, SR↓, P↓, DD↑, C↓, T↓`.
+`DD↑` sorts ascending (lower drawdown is better); everything else
+descending (higher values rank first). Supply `--sort ABBR_LIST` as a
+comma-separated list to reorder; unmentioned metrics append at the
+end in their default positional order.
 
 **EA-agnostic by design**: the script does not hardcode any input
 parameter name. Type inference reads `<Data ss:Type="String">` from
