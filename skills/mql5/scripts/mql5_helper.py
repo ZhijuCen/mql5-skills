@@ -108,6 +108,32 @@ TYPE_DIRS = {
 }
 
 
+def _to_wine_path(path: Path) -> str:
+    """Convert a Unix path under the Wine prefix to a Windows-style path.
+
+    If *path* is under a Wine drive directory (e.g. ``~/.wine/drive_c/``),
+    returns ``X:\\...`` with backslashes.  Otherwise returns the path as-is
+    (native Windows or non-Wine path).
+
+    The Wine prefix root is read from ``WINEPREFIX`` env var (default:
+    ``~/.wine``).  Drives ``c`` through ``h`` are scanned in order; the
+    first match wins.
+    """
+    wine_prefix = Path(os.environ.get("WINEPREFIX", Path.home() / ".wine"))
+    for letter in "cdefgh":
+        drive_dir = wine_prefix / f"drive_{letter}"
+        if not drive_dir.is_dir():
+            continue
+        try:
+            rel = path.relative_to(drive_dir)
+            rel_str = rel.as_posix().replace("/", "\\")
+            return f"{letter.upper()}:\\{rel_str}"
+        except ValueError:
+            continue
+    # Not under any Wine drive — return as-is (could be native Windows)
+    return str(path)
+
+
 def detect_type(file_path: Path) -> str:
     """Detect program type from file path segments (path-only, no content read)."""
     for p in file_path.parts:
@@ -159,12 +185,13 @@ def cmd_compile(args):
     shutil.copy2(src, dest)
     print(f"Deployed: {src.name} → {dest}")
 
-    # Compile: /compile:"path" /log (absolute path, cwd doesn't matter)
+    # Compile: /compile:"path" /log (cwd = Editor directory, path = Windows-style)
+    compile_arg = f'/compile:"{_to_wine_path(dest)}"'
     try:
         result = subprocess.run(
-            ["wine", str(editor), f'/compile:"{dest}"', "/log"],
+            ["wine", str(editor), compile_arg, "/log"],
             capture_output=True, text=True, timeout=60,
-            cwd=str(dest.parent),
+            cwd=str(editor.parent),
         )
         print(f"Compile output:\n{result.stdout}")
         if result.stderr:
@@ -213,12 +240,13 @@ def cmd_check(args):
     shutil.copy2(src, dest)
     print(f"Deployed: {src.name} → {dest}")
 
-    # Syntax check: /compile:"path" /log /s (absolute path)
+    # Syntax check: /compile:"path" /log /s (cwd = Editor directory, path = Windows-style)
+    compile_arg = f'/compile:"{_to_wine_path(dest)}"'
     try:
         result = subprocess.run(
-            ["wine", str(editor), f'/compile:"{dest}"', "/log", "/s"],
+            ["wine", str(editor), compile_arg, "/log", "/s"],
             capture_output=True, text=True, timeout=60,
-            cwd=str(dest.parent),
+            cwd=str(editor.parent),
         )
         print(f"Syntax check output:\n{result.stdout}")
         if result.stderr:
