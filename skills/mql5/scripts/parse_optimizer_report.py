@@ -811,6 +811,358 @@ def _fmt_sort_priority(priority: list[str]) -> str:
     return ", ".join(parts)
 
 
+# ── Failure-set analysis (per-column value distribution over failing passes) ──
+#
+# A pass is "failing" when ANY of the following holds (an OR chain — a single
+# failure is enough to drop the pass from the deployable set):
+#   - Profit           < 0
+#   - Profit Factor    < 1
+#   - Expected Payoff  < 0.1
+#   - Equity DD %      > 60
+#   - Recovery Factor  < 1
+#   - Sharpe Ratio     < 1
+#
+# These thresholds are independent of the run (not z-scores), which makes the
+# failure set interpretable on its own — a pass satisfying every criterion is
+# deployment-grade on absolute terms, not only relative to this run.
+
+_FAILURE_CRITERIA: list[dict] = [
+    # {"metric": MT5 column, "op": "lt"/"gt", "threshold": float}
+    {"metric": "Profit",          "op": "lt", "threshold": 0.0},
+    {"metric": "Profit Factor",   "op": "lt", "threshold": 1.0},
+    {"metric": "Expected Payoff", "op": "lt", "threshold": 0.1},
+    {"metric": "Equity DD %",     "op": "gt", "threshold": 60.0},
+    {"metric": "Recovery Factor", "op": "lt", "threshold": 1.0},
+    {"metric": "Sharpe Ratio",    "op": "lt", "threshold": 1.0},
+]
+
+
+def _row_fails(row: pd.Series, present_metrics: list[str]) -> dict:
+    """Return {criterion_name: bool} for each criterion; missing metric = False.
+
+    A criterion that references a metric absent from the report (rare — only
+    happens for hand-built reports) defaults to False so we don't false-flag.
+    """
+    flags: dict[str, bool] = {}
+    for c in _FAILURE_CRITERIA:
+        m = c["metric"]
+        if m not in present_metrics:
+            flags[c["metric"]] = False
+            continue
+        v = row[m]
+        if pd.isna(v):
+            # NaN on a failure-defining metric — treat as "unknown, don't fail"
+            flags[c["metric"]] = False
+            continue
+        v_f = float(v)
+        if c["op"] == "lt":
+            flags[m] = v_f < c["threshold"]
+        else:  # "gt"
+            flags[m] = v_f > c["threshold"]
+    return flags
+
+
+def find_failures(df: pd.DataFrame) -> dict:
+    """Per-parameter value distribution over the failure set.
+
+    A pass is in the failure set iff it triggers at least one criterion in
+    ``_FAILURE_CRITERIA``. For each input parameter column (everything after
+    ``Trades``), we tally how many failing passes hold each value, plus the
+    percentage relative to the failure set size.
+
+    Two complementary percentages are reported:
+      - pct_of_failures = count_value / n_failures × 100   (share of the failure set)
+      - pct_in_failures_vs_global = count_value / global_count_value × 100
+        (how concentrated the failures are in this value, vs the run as a whole).
+        ">100% impossible; <100% means the value is under-represented in
+        failures; >100% does not occur because every failing pass holds some
+        value of every param. Skipped when global_count_value == 0."
+
+    Returns:
+        dict with keys:
+          - env_card, n_passes, n_failures, n_passing
+          - criteria: dict criterion_name -> {metric, op, threshold, n_triggered}
+          - per_param: dict param_name -> list of
+              {"value": str, "count": int, "pct_of_failures": float,
+               "global_count": int, "pct_of_global": float}
+          - failing_passes: summary list of top failing passes (Pass id,
+            triggered criteria, key metric values, parameter values) for
+            cross-reference with `outliers`.
+    """
+    out: dict = {}
+    if df.empty:
+        out["error"] = "No pass rows"
+        return out
+
+    # Resolve which metric columns are actually present in this report.
+    present_metrics = [c["metric"] for c in _FAILURE_CRITERIA if c["metric"] in df.columns]
+    out["missing_criteria_metrics"] = sorted(
+        {c["metric"] for c in _FAILURE_CRITERIA} - set(present_metrics)
+    )
+
+    # Per-row failure flags.
+    per_row_flags: list[tuple[int, dict, set[str]]] = []
+    criteria_trigger_count: dict[str, int] = {m: 0 for m in present_metrics}
+    for idx, row in df.iterrows():
+        flags = _row_fails(row, present_metrics)
+        triggered = {m for m, failed in flags.items() if failed}
+        per_row_flags.append((idx, flags, triggered))
+        for m in triggered:
+            criteria_trigger_count[m] += 1
+
+    failing_idx = [idx for idx, _, trig in per_row_flags if trig]
+    n_failures = len(failing_idx)
+    n_passes = len(df)
+
+    out["n_passes"] = n_passes
+    out["n_failures"] = n_failures
+    out["n_passing"] = n_passes - n_failures
+    out["failure_rate_pct"] = round(100.0 * n_failures / n_passes, 2) if n_passes else 0.0
+
+    out["criteria"] = [
+        {
+            "metric": c["metric"],
+            "op": c["op"],
+            "threshold": c["threshold"],
+            "n_triggered": criteria_trigger_count.get(c["metric"], 0),
+            "human": _format_criterion(c),
+        }
+        for c in _FAILURE_CRITERIA
+    ]
+
+    pcols = _param_cols(df)
+    out["params"] = list(pcols)
+
+    per_param: dict = {}
+    if n_failures == 0:
+        # Avoid divide-by-zero; emit empty distributions.
+        for p in pcols:
+            per_param[p] = []
+    else:
+        failing_df = df.loc[failing_idx]
+        for p in pcols:
+            counts = (
+                failing_df[p]
+                .value_counts(dropna=False)
+                .reset_index(name="count")
+            )
+            counts.columns = ["value", "count"]  # first col is the param name
+            # Global counts (across all passes) for the pct_of_global column.
+            global_counts = (
+                df[p].value_counts(dropna=False).to_dict()
+            )
+            records: list[dict] = []
+            for _, r in counts.iterrows():
+                v = r["value"]
+                cnt = int(r["count"])
+                gc = int(global_counts.get(v, 0))
+                rec = {
+                    "value": _fmt_param_value(v),
+                    "count": cnt,
+                    "pct_of_failures": round(100.0 * cnt / n_failures, 2),
+                    "global_count": gc,
+                }
+                if gc > 0:
+                    rec["pct_of_global"] = round(100.0 * cnt / gc, 2)
+                else:
+                    rec["pct_of_global"] = None
+                records.append(rec)
+            # Sort: descending count, then by the value itself for stable output.
+            records.sort(key=lambda d: (-d["count"], str(d["value"])))
+            per_param[p] = records
+    out["per_param"] = per_param
+
+    # Top failing passes (≤10) for cross-reference with `outliers`.
+    failing_records: list[dict] = []
+    for idx, flags, triggered in per_row_flags:
+        if not triggered:
+            continue
+        row = df.loc[idx]
+        rec = {
+            "Pass": int(row["Pass"]) if "Pass" in df.columns and pd.notna(row["Pass"]) else None,
+            "Result": float(row["Result"]) if "Result" in df.columns and pd.notna(row["Result"]) else None,
+            "Profit": float(row["Profit"]) if "Profit" in df.columns and pd.notna(row["Profit"]) else None,
+            "Expected Payoff": float(row["Expected Payoff"]) if "Expected Payoff" in df.columns and pd.notna(row["Expected Payoff"]) else None,
+            "Profit Factor": float(row["Profit Factor"]) if "Profit Factor" in df.columns and pd.notna(row["Profit Factor"]) else None,
+            "Recovery Factor": float(row["Recovery Factor"]) if "Recovery Factor" in df.columns and pd.notna(row["Recovery Factor"]) else None,
+            "Sharpe Ratio": float(row["Sharpe Ratio"]) if "Sharpe Ratio" in df.columns and pd.notna(row["Sharpe Ratio"]) else None,
+            "Equity DD %": float(row["Equity DD %"]) if "Equity DD %" in df.columns and pd.notna(row["Equity DD %"]) else None,
+            "Trades": int(row["Trades"]) if "Trades" in df.columns and pd.notna(row["Trades"]) else None,
+            "triggered": sorted(triggered),
+            "n_triggered": len(triggered),
+            "params": {p: _fmt_param_value(row[p]) for p in pcols},
+        }
+        failing_records.append(rec)
+
+    # Sort: most-triggered first, then by Result ascending, then by Equity DD % desc.
+    def _fail_sort_key(r: dict) -> tuple:
+        return (
+            -r["n_triggered"],
+            r["Result"] if r["Result"] is not None else 0.0,
+            -(r["Equity DD %"] if r["Equity DD %"] is not None else 0.0),
+        )
+    failing_records.sort(key=_fail_sort_key)
+    out["failing_passes_top"] = failing_records[:10]
+    out["failing_passes_total"] = len(failing_records)
+
+    return out
+
+
+def _format_criterion(c: dict) -> str:
+    """Human-readable criterion expression: 'Profit Factor < 1'."""
+    op_str = "<" if c["op"] == "lt" else ">"
+    return f"{c['metric']} {op_str} {c['threshold']}"
+
+
+def _fmt_param_value(v) -> str:
+    """Render a pandas value as a compact, JSON-friendly string."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "<NA>"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def print_failures(env: Env, df: pd.DataFrame, out: dict) -> None:
+    """Pretty-print the failure-set analysis as a text report.
+
+    Layout:
+      Header card (env + n_passes / n_failures / n_passing / failure_rate)
+      Criteria table (one row per criterion with the triggered count)
+      Per-parameter distribution tables (sorted by descending count)
+      Top failing passes cross-reference (≤10)
+
+    Each parameter table shows:
+      value          count    pct_of_failures   global_count   pct_of_global
+    where pct_of_global is the share of all passes with that parameter value
+    that ended up failing — a concentration measure that complements the
+    within-failure-set share.
+    """
+    print("=" * 78)
+    print("  Optimization Failure-Set Analysis  "
+          "(per-param value distribution over failing passes)")
+    print("=" * 78)
+    print(f"  EA: {env.ea_name or '(unknown)'}  Symbol: {env.symbol or '(unknown)'}  "
+          f"Period: {env.period or '(unknown)'}")
+    print(f"  Date range: {env.date_from} → {env.date_to}")
+    print()
+
+    if "error" in out:
+        print(f"  ERROR: {out['error']}")
+        return
+
+    if out.get("missing_criteria_metrics"):
+        print(f"  ⚠️  Missing criteria metrics in report: "
+              f"{', '.join(out['missing_criteria_metrics'])} — those criteria cannot fire")
+
+    # Summary
+    print(f"  Passes total:        {out['n_passes']}")
+    print(f"  Passes failing:      {out['n_failures']}  "
+          f"({out['failure_rate_pct']:.2f}% of total)")
+    print(f"  Passes passing:      {out['n_passing']}")
+    print()
+
+    # Criteria table
+    print("  Criteria (a pass fails if ANY one fires — OR chain):")
+    print(f"  {'Criterion':<28} {'Triggered':>12} {'% of passes':>14}")
+    print("  " + "─" * 58)
+    for c in out["criteria"]:
+        pct = (100.0 * c["n_triggered"] / out["n_passes"]) if out["n_passes"] else 0.0
+        print(f"  {c['human']:<28} {c['n_triggered']:>12} {pct:>13.2f}%")
+    print()
+
+    # Per-parameter tables
+    if not out["per_param"]:
+        print("  No parameters to tabulate.")
+    elif out["n_failures"] == 0:
+        print("  Failure set is empty — every pass satisfies all criteria.")
+        print("  (Parameter tables would be meaningless; skipped.)")
+    else:
+        for p, records in out["per_param"].items():
+            self_width = max(len(p), 12)
+            print("=" * 78)
+            print(f"  Parameter: {p}   ({len(records)} distinct values in failure set)")
+            print("=" * 78)
+            print(f"  {'value':<{self_width}} {'count':>7} "
+                  f"{'pct_of_failures':>16} {'global_count':>14} {'pct_of_global':>14}")
+            print("  " + "─" * (self_width + 4 + 7 + 16 + 14 + 14))
+            for r in records:
+                pct_g = r.get("pct_of_global")
+                pct_g_str = f"{pct_g:>13.2f}%" if pct_g is not None else f"{'n/a':>14}"
+                print(f"  {str(r['value'])[:self_width]:<{self_width}} "
+                      f"{r['count']:>7} "
+                      f"{r['pct_of_failures']:>15.2f}% "
+                      f"{r['global_count']:>14} "
+                      f"{pct_g_str}")
+            print()
+
+    # Top failing passes cross-reference
+    if out.get("failing_passes_top"):
+        n_top = len(out["failing_passes_top"])
+        n_total = out.get("failing_passes_total", n_top)
+        print("=" * 78)
+        print(f"  TOP FAILING PASSES — most-triggered first, top {n_top} of {n_total}")
+        print("=" * 78)
+        for rec in out["failing_passes_top"]:
+            pass_str = f"Pass {rec['Pass']:<5}" if rec["Pass"] is not None else "Pass ?    "
+            res_str = f"Result={rec['Result']:.2f}" if rec["Result"] is not None else "Result=?"
+            trig = ", ".join(rec["triggered"])
+            print(f"  {pass_str} {res_str}  "
+                  f"({rec['n_triggered']} criteria: {trig})")
+            # Key metrics
+            metric_parts = []
+            for label, key, fmt in [
+                ("Profit", "Profit", "{:.1f}"),
+                ("EP", "Expected Payoff", "{:.3f}"),
+                ("PF", "Profit Factor", "{:.2f}"),
+                ("RF", "Recovery Factor", "{:.2f}"),
+                ("Sharpe", "Sharpe Ratio", "{:.2f}"),
+                ("EqDD%", "Equity DD %", "{:.2f}"),
+                ("Trades", "Trades", "{}"),
+            ]:
+                v = rec.get(key)
+                if v is None:
+                    continue
+                if key == "Trades":
+                    metric_parts.append(f"{label}={int(v)}")
+                else:
+                    metric_parts.append(f"{label}={fmt.format(v)}")
+            if metric_parts:
+                print(f"           Metrics:   " + "  ".join(metric_parts))
+            # Params (compact)
+            if rec["params"]:
+                pparts = [f"{p}={v}" for p, v in rec["params"].items()]
+                lines = []
+                cur, cur_len = [], 0
+                for part in pparts:
+                    if cur and cur_len + len(part) + 2 > 70:
+                        lines.append(", ".join(cur))
+                        cur, cur_len = [part], len(part)
+                    else:
+                        cur.append(part)
+                        cur_len += len(part) + 2
+                if cur:
+                    lines.append(", ".join(cur))
+                print(f"           Params:    {lines[0]}")
+                for extra in lines[1:]:
+                    print(f"                      {extra}")
+            print()
+    elif out["n_failures"] > 0:
+        print("  Top failing passes: skipped (empty result set).")
+    print()
+
+    # Interpretation
+    print("  Interpretation:")
+    print("    A pass is in the failure set when ANY criterion fires (OR chain).")
+    print("    For each parameter, pct_of_failures is the share of failing")
+    print("    passes that hold that value; pct_of_global is the share of")
+    print("    ALL passes with that value that ended up failing — a")
+    print("    concentration measure.")
+    print("    A single value where pct_of_global is large (>50%) is a")
+    print("    smoking gun for the parameter; values near the global average")
+    print("    are pure sampling noise.")
+
+
 def print_outliers(env: Env, df: pd.DataFrame, out: dict) -> None:
     """Pretty-print the outlier scan as a text report.
 
@@ -1091,37 +1443,221 @@ def print_analyze(env: Env, df: pd.DataFrame, an: dict) -> None:
 
 # ── CLI ──────────────────────────────────────────────────────────────
 
+# Sub-command catalogue kept at module level so the position-order validator
+# (``_validate_argv_position``) stays in sync with what argparse actually
+# accepts.
+_VALID_SUBCOMMANDS = {"report", "analyze", "outliers", "failures"}
+
+
+def _validate_argv_position(argv: list[str], prog: str = "") -> None:
+    """Reject any argv layout where a sub-command is NOT the first token.
+
+    Target layout — mandatory:
+        {prog} [--help] SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]
+
+    Specifically:
+      - The very first non-flag token must be one of ``_VALID_SUBCOMMANDS``.
+      - ``--help``/``-h`` is the only flag allowed before the sub-command
+        (so `*.py --help` reaches argparse's help path without confusion).
+      - ``-o``/``--output`` is a sub-command-level flag — it MUST come after
+        SUB_COMMAND. We enforce that here so the user gets a clear error
+        instead of an argparse stack trace.
+
+    Exits with a clear error message + usage hint. Skipped when the user only
+    passed ``--help``/``-h`` (in which case argparse prints its own usage).
+    """
+    if argv in ([], ["--help"], ["-h"]):
+        return  # argparse will handle --help cleanly
+
+    # Find the first non-flag token after skipping leading --help.
+    i = 0
+    if argv and argv[0] in ("--help", "-h"):
+        return
+
+    # The first token must be the sub-command — no global flags before it
+    # other than --help. We strictly enforce this; even a leading --json is
+    # rejected, telling the user to move it after the sub-command.
+    if not argv or argv[0].startswith("-"):
+        print(
+            f"Error: {prog} requires a sub-command as the first argument.\n"
+            f"  Expected layout:  {prog} SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]\n"
+            f"  Valid sub-commands: {', '.join(sorted(_VALID_SUBCOMMANDS))}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    sub = argv[0]
+    if sub not in _VALID_SUBCOMMANDS:
+        if sub.startswith("-"):
+            print(
+                f"Error: flags must come AFTER the sub-command.\n"
+                f"  Expected layout:  {prog} SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]\n"
+                f"  Got: {' '.join(argv)}\n"
+                f"  Valid sub-commands: {', '.join(sorted(_VALID_SUBCOMMANDS))}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(
+            f"Error: unknown sub-command '{sub}'.\n"
+            f"  Expected layout:  {prog} SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]\n"
+            f"  Valid sub-commands: {', '.join(sorted(_VALID_SUBCOMMANDS))}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Walk past optional sub-command-level flags to find the INPUT_FILE
+    # positional. We accept any "short-form" pattern that looks like a flag
+    # (starts with "-" but isn't a bare "-") — including -o OUT, --json,
+    # --sigma 2.5, --top-outliers 10, etc. The cursor advances by 2 when the
+    # flag looks like it takes a value (no leading "=" yet consumed and the
+    # next token doesn't start with "-"); otherwise just by 1.
+    j = 1
+    # Flags that take NO value (presence-only).
+    no_value_flags = {"--json"}
+    while j < len(argv) and argv[j].startswith("-"):
+        tok = argv[j]
+        # --top-outliers=N or --top-outliers N style
+        if "=" in tok:
+            j += 1
+            continue
+        if tok in no_value_flags:
+            j += 1
+            continue
+        # Anything else takes a value: -o OUT, --sigma 2.5, --sort EP,...
+        if tok in ("-o", "--output"):
+            # The mandatory OUTPUT_FILE value comes right after.
+            if j + 1 < len(argv) and not argv[j + 1].startswith("-"):
+                j += 2
+            else:
+                # argparse will print a friendly error for missing -o value.
+                return
+            continue
+        if j + 1 < len(argv) and not argv[j + 1].startswith("-"):
+            j += 2
+        else:
+            j += 1
+
+    if j >= len(argv):
+        print(
+            f"Error: sub-command '{sub}' requires an INPUT_FILE positional.\n"
+            f"  Expected layout:  {prog} {sub} INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _emit_text(text: str, output_path: str | None) -> None:
+    """Print to stdout, or write to a file path when -o was given."""
+    if output_path:
+        Path(output_path).write_text(text, encoding="utf-8")
+    else:
+        print(text, end="" if text.endswith("\n") else "\n")
+
+
+def _emit_json(obj: dict, output_path: str | None) -> None:
+    """Dump JSON to stdout or to a file when -o was given."""
+    payload = json.dumps(obj, indent=2, ensure_ascii=False, default=str)
+    if output_path:
+        Path(output_path).write_text(payload + "\n", encoding="utf-8")
+    else:
+        print(payload)
+
+
+def _capture_stdout(func, *args, **kwargs) -> str:
+    """Run ``func`` while capturing what it prints; return that as a string."""
+    import io
+    buf = io.StringIO()
+    saved = sys.stdout
+    sys.stdout = buf
+    try:
+        func(*args, **kwargs)
+    finally:
+        sys.stdout = saved
+    return buf.getvalue()
+
+
 def main() -> None:
+    prog = Path(sys.argv[0]).name
+    _validate_argv_position(sys.argv[1:], prog=prog)
+
     parser = argparse.ArgumentParser(
+        prog=prog,
         description="Parse MT5 Strategy Tester Optimization XML report",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Target CLI layout (mandatory):
+  %(prog)s [--help] SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]
+
+Sub-commands:
+  report     Default text report (env card + parameter cardinalities).
+  analyze    Full analysis: parameter effect, duplicates, best passes, trade
+             distribution.
+  outliers   Per-pass z-score outlier scan on the 8 performance metrics.
+             Splits passes into "has at least one strong outlier" vs "no
+             outlier"; both sorted by the configured priority.
+  failures   Failure-set analysis: per-parameter value distribution over
+             passes that fail at least one of 6 absolute criteria.
+
+Sub-command flags (always come AFTER the sub-command and INPUT_FILE):
+  --json            Emit JSON instead of the default text report.
+  -o OUTPUT_FILE    Write output to OUTPUT_FILE instead of stdout. Encoding
+                    is JSON when --json is set, otherwise text.
+
 Examples:
-  # Text report (default)
-  python %(prog)s ReportOptimizer-*.xml
+  # Default text report, written to a file
+  %(prog)s report jobs/foo/ReportOptimizer-*.xml -o report.txt
 
-  # JSON dump (raw parsed data)
-  python %(prog)s ReportOptimizer-*.xml --json
+  # Full JSON analysis
+  %(prog)s analyze jobs/foo/ReportOptimizer-*.xml --json -o analysis.json
 
-  # Full optimization analysis (parameter effect, duplicates, best passes)
-  python %(prog)s ReportOptimizer-*.xml --analyze
+  # Outlier scan with custom sigma + write output
+  %(prog)s outliers jobs/foo/ReportOptimizer-*.xml --sigma 2.5 -o outliers.txt
 
-  # Outlier scan: per-pass z-score on the 8 perf metrics,
-  # split into "has at least one strong outlier" vs "no outlier"
-  python %(prog)s ReportOptimizer-*.xml outliers
-  python %(prog)s ReportOptimizer-*.xml outliers --top-outliers 5 --top-normal 5 --sigma 2
-  python %(prog)s ReportOptimizer-*.xml outliers --json
+  # Failure-set analysis
+  %(prog)s failures jobs/foo/ReportOptimizer-*.xml
+  %(prog)s failures jobs/foo/ReportOptimizer-*.xml --json -o failures.json
 """,
     )
-    parser.add_argument("report", help="Path to ReportOptimizer-*.xml file")
-    parser.add_argument("--json", action="store_true", help="Output raw parsed data as JSON")
-    parser.add_argument(
-        "--analyze",
-        action="store_true",
-        help="Run optimization analysis (parameter effect, duplicates, best passes, trade distribution)",
-    )
-    sub = parser.add_subparsers(dest="cmd")
+    sub = parser.add_subparsers(dest="cmd", metavar="SUB_COMMAND", required=True)
 
+    def _add_shared(sub_parser):
+        """Add the flags every sub-command understands."""
+        sub_parser.add_argument(
+            "report", help="Path to ReportOptimizer-*.xml file",
+        )
+        sub_parser.add_argument(
+            "--json", action="store_true",
+            help="Emit JSON instead of the default text report",
+        )
+        sub_parser.add_argument(
+            "-o", "--output", dest="output", default=None, metavar="OUTPUT_FILE",
+            help="Write output to OUTPUT_FILE (default: stdout). Encoding is "
+                 "auto-detected: --json => JSON, otherwise text.",
+        )
+
+    # ── report ──
+    p_report = sub.add_parser(
+        "report",
+        help="Default text report (env card + parameter cardinalities).",
+        description="Default text report: env card (EA / Symbol / Period / dates / "
+                    "deposit / leverage / MT5 build), then per-parameter "
+                    "cardinalities. Use `analyze` for parameter-effect analysis.",
+    )
+    _add_shared(p_report)
+
+    # ── analyze ──
+    p_an = sub.add_parser(
+        "analyze",
+        help="Full analysis (parameter effect, duplicates, best passes, trade distribution).",
+        description="Full optimization analysis: orthogonality, per-parameter "
+                    "effect/dead-param detection, duplicates, best passes by "
+                    "Profit/PF/RF/Custom, trade-count distribution + correlations. "
+                    "Emit JSON when --json is set (recommended for downstream "
+                    "processing); otherwise emit a text report.",
+    )
+    _add_shared(p_an)
+
+    # ── outliers ──
     p_out = sub.add_parser(
         "outliers",
         help="Per-pass z-score outlier scan on the 8 performance metrics. "
@@ -1133,23 +1669,23 @@ Examples:
         epilog="""
 Examples:
   # Default: sigma=2, top 10 outlier passes, top 5 normal passes
-  python parse_optimizer_report.py ReportOptimizer-*.xml outliers
+  %(prog)s outliers INPUT_FILE
 
   # Custom sort: priority by EP, then RF, then R, then P; rest in default order
-  python parse_optimizer_report.py ReportOptimizer-*.xml outliers --sort EP,RF,R,P
+  %(prog)s outliers INPUT_FILE --sort EP,RF,R,P
 
   # Single priority metric; all others follow in default order
-  python parse_optimizer_report.py ReportOptimizer-*.xml outliers --sort EP
+  %(prog)s outliers INPUT_FILE --sort EP
 
   # Tighter sigma threshold and custom top-N
-  python parse_optimizer_report.py ReportOptimizer-*.xml outliers --sigma 3 --top-outliers 5
+  %(prog)s outliers INPUT_FILE --sigma 3 --top-outliers 5
 
   # JSON output for further processing
-  python parse_optimizer_report.py ReportOptimizer-*.xml outliers --json
+  %(prog)s outliers INPUT_FILE --json
 
 For higher-is-better metrics (Profit, Profit Factor, Recovery Factor,
 Sharpe Ratio, Expected Payoff, Custom, Result), an outlier is z >= +σ.
-For lower-is-better (Equity DD %), an outlier is z <= -σ. Passes whose
+For lower-is-better (Equity DD %), the criterion is z <= -σ. Passes whose
 Trades count is itself a low-side outlier (z <= -σ) are excluded
 first — they have too few trades to trust.
 
@@ -1160,6 +1696,7 @@ Sort abbreviations (for --sort):
   (↓ = descending, ↑ = ascending; Equity DD % ascends — lower is better)
 """,
     )
+    _add_shared(p_out)
     p_out.add_argument(
         "--sigma", "-s", type=float, default=2.0,
         help="z-score threshold for the outlier scan (default: 2.0)",
@@ -1180,11 +1717,39 @@ Sort abbreviations (for --sort):
              "Abbreviations: R=Result P=Profit EP=Expected Payoff PF=Profit Factor "
              "RF=Recovery Factor SR=Sharpe Ratio C=Custom DD=Equity DD %% T=Trades",
     )
-    p_out.add_argument(
-        "--json", action="store_true", help="Output outliers data as JSON",
+
+    # ── failures ──
+    p_fail = sub.add_parser(
+        "failures",
+        help="Failure-set analysis: per-parameter value distribution over passes "
+             "that fail at least one of 6 absolute criteria (Profit<0, PF<1, "
+             "EP<0.1, EqDD%%>60, RF<1, Sharpe<1).",
+        description="Failure-set analysis: a pass is in the failure set when ANY of "
+                    "6 absolute criteria fires (an OR chain — a single failure is "
+                    "enough to drop the pass from the deployable set). For each "
+                    "input parameter column, tabulate count + pct_of_failures + "
+                    "pct_of_global (the share of all passes with that value that "
+                    "ended up failing — a concentration measure).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Default: text report (criteria table + per-param value tables + top-10 fails)
+  %(prog)s failures INPUT_FILE
+
+  # JSON output for downstream piping
+  %(prog)s failures INPUT_FILE --json
+
+  # Save text report to a file
+  %(prog)s failures INPUT_FILE -o failures_report.txt
+
+A single parameter value where pct_of_global > 50% is a smoking gun: nearly
+every pass with that setting fails. Drop it from the optimization grid.
+""",
     )
+    _add_shared(p_fail)
 
     args = parser.parse_args()
+    output_path = getattr(args, "output", None)
 
     path = Path(args.report)
     if not path.exists():
@@ -1192,7 +1757,37 @@ Sort abbreviations (for --sort):
         sys.exit(1)
 
     env, df = parse_report(path)
-    analyze_data = analyze(df, env) if (args.analyze or args.json) else None
+
+    # ── dispatch ──
+    if args.cmd == "report":
+        if args.json:
+            payload = {
+                "env": asdict(env),
+                "pass_count": int(len(df)),
+                "columns": list(df.columns),
+                "passes": df.where(pd.notnull(df), None).to_dict("records"),
+            }
+            _emit_json(payload, output_path)
+        else:
+            text = _capture_stdout(print_report, env, df)
+            _emit_text(text, output_path)
+        return
+
+    if args.cmd == "analyze":
+        analyze_data = analyze(df, env)
+        if args.json:
+            payload = {
+                "env": asdict(env),
+                "pass_count": int(len(df)),
+                "columns": list(df.columns),
+                "passes": df.where(pd.notnull(df), None).to_dict("records"),
+                "analyze": analyze_data,
+            }
+            _emit_json(payload, output_path)
+        else:
+            text = _capture_stdout(print_analyze, env, df, analyze_data)
+            _emit_text(text, output_path)
+        return
 
     if args.cmd == "outliers":
         out_data = find_outliers(
@@ -1202,30 +1797,37 @@ Sort abbreviations (for --sort):
             top_normal=args.top_normal,
             sort_priority=_parse_sort_priority(args.sort),
         )
-        if getattr(args, "json", False):
+        if args.json:
             payload = {
                 "env": asdict(env),
                 "pass_count": int(len(df)),
                 "columns": list(df.columns),
                 "outliers": out_data,
             }
-            print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+            _emit_json(payload, output_path)
         else:
-            print_outliers(env, df, out_data)
+            text = _capture_stdout(print_outliers, env, df, out_data)
+            _emit_text(text, output_path)
         return
 
-    if args.json or args.analyze:
-        payload = {
-            "env": asdict(env),
-            "pass_count": int(len(df)),
-            "columns": list(df.columns),
-            "passes": df.where(pd.notnull(df), None).to_dict("records"),
-        }
-        if analyze_data is not None:
-            payload["analyze"] = analyze_data
-        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
-    else:
-        print_report(env, df)
+    if args.cmd == "failures":
+        fail_data = find_failures(df)
+        if args.json:
+            payload = {
+                "env": asdict(env),
+                "pass_count": int(len(df)),
+                "columns": list(df.columns),
+                "failures": fail_data,
+            }
+            _emit_json(payload, output_path)
+        else:
+            text = _capture_stdout(print_failures, env, df, fail_data)
+            _emit_text(text, output_path)
+        return
+
+    # argparse with required=True on the subparsers group guarantees we never
+    # get here, but be explicit for future maintenance.
+    parser.error(f"unknown sub-command: {args.cmd}")
 
 
 if __name__ == "__main__":

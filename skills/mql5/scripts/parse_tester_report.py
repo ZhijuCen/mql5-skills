@@ -1335,32 +1335,195 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
 
 # ── CLI ──────────────────────────────────────────────────────────────
 
+# Sub-command catalogue kept at module level so the position-order validator
+# stays in sync with what argparse actually accepts.
+_VALID_SUBCOMMANDS = {"report", "analyze", "windows"}
+
+
+def _validate_argv_position(argv: list[str], prog: str = "") -> None:
+    """Reject any argv layout where a sub-command is NOT the first token.
+
+    Target layout — mandatory:
+        {prog} [--help] SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]
+
+    Specifically:
+      - ``--help``/``-h`` is the only flag allowed before the sub-command.
+      - The first non-flag token must be one of ``_VALID_SUBCOMMANDS``.
+      - ``-o``/``--output`` must come after SUB_COMMAND (we enforce here so
+        the user gets a clear error instead of an argparse stack trace).
+
+    Exits with a clear error message + usage hint. Skipped when the user only
+    passed ``--help``/``-h`` (in which case argparse prints its own usage).
+    """
+    if argv in ([], ["--help"], ["-h"]):
+        return
+
+    if argv and argv[0] in ("--help", "-h"):
+        return
+
+    if not argv or argv[0].startswith("-"):
+        print(
+            f"Error: {prog} requires a sub-command as the first argument.\n"
+            f"  Expected layout:  {prog} SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]\n"
+            f"  Valid sub-commands: {', '.join(sorted(_VALID_SUBCOMMANDS))}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    sub = argv[0]
+    if sub not in _VALID_SUBCOMMANDS:
+        if sub.startswith("-"):
+            print(
+                f"Error: flags must come AFTER the sub-command.\n"
+                f"  Expected layout:  {prog} SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]\n"
+                f"  Got: {' '.join(argv)}\n"
+                f"  Valid sub-commands: {', '.join(sorted(_VALID_SUBCOMMANDS))}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(
+            f"Error: unknown sub-command '{sub}'.\n"
+            f"  Expected layout:  {prog} SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]\n"
+            f"  Valid sub-commands: {', '.join(sorted(_VALID_SUBCOMMANDS))}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Walk past optional sub-command-level flags to find the INPUT_FILE
+    # positional.
+    j = 1
+    no_value_flags = {"--json"}
+    while j < len(argv) and argv[j].startswith("-"):
+        tok = argv[j]
+        if "=" in tok:
+            j += 1
+            continue
+        if tok in no_value_flags:
+            j += 1
+            continue
+        if tok in ("-o", "--output"):
+            if j + 1 < len(argv) and not argv[j + 1].startswith("-"):
+                j += 2
+            else:
+                return
+            continue
+        if j + 1 < len(argv) and not argv[j + 1].startswith("-"):
+            j += 2
+        else:
+            j += 1
+
+    if j >= len(argv):
+        print(
+            f"Error: sub-command '{sub}' requires an INPUT_FILE positional.\n"
+            f"  Expected layout:  {prog} {sub} INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _emit_text(text: str, output_path: str | None) -> None:
+    """Print to stdout, or write to a file path when -o was given."""
+    if output_path:
+        Path(output_path).write_text(text, encoding="utf-8")
+    else:
+        print(text, end="" if text.endswith("\n") else "\n")
+
+
+def _emit_json(obj, output_path: str | None) -> None:
+    """Dump JSON to stdout or to a file when -o was given."""
+    payload = json.dumps(obj, indent=2, ensure_ascii=False, default=str)
+    if output_path:
+        Path(output_path).write_text(payload + "\n", encoding="utf-8")
+    else:
+        print(payload)
+
+
+def _capture_stdout(func, *args, **kwargs) -> str:
+    """Run ``func`` while capturing what it prints; return that as a string."""
+    import io
+    buf = io.StringIO()
+    saved = sys.stdout
+    sys.stdout = buf
+    try:
+        func(*args, **kwargs)
+    finally:
+        sys.stdout = saved
+    return buf.getvalue()
+
+
 def main():
+    prog = Path(sys.argv[0]).name
+    _validate_argv_position(sys.argv[1:], prog=prog)
+
     parser = argparse.ArgumentParser(
+        prog=prog,
         description="Parse MT5 Strategy Tester HTML report",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Target CLI layout (mandatory):
+  %(prog)s [--help] SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]
+
+Sub-commands:
+  report     Default text report (env card + key statistics + trade summary).
+  analyze    Full trade analysis (idle time, monthly breakdown, re-entry
+             detection, streak analysis). Always JSON if --json is set.
+  windows    Split the backtest into N equal time windows and recompute the
+             7 core metrics per window — over-fitting / regime detection.
+
+Sub-command flags (always come AFTER the sub-command and INPUT_FILE):
+  --json            Emit JSON instead of the default text report.
+  -o OUTPUT_FILE    Write output to OUTPUT_FILE instead of stdout.
+
 Examples:
-  # Text report (default)
-  python %(prog)s report.html
+  # Default text report, written to a file
+  %(prog)s report jobs/foo/ReportTester-*.html -o summary.txt
 
-  # JSON dump (raw parsed data)
-  python %(prog)s report.html --json
+  # Full JSON analysis
+  %(prog)s analyze jobs/foo/ReportTester-*.html --json -o analysis.json
 
-  # Full trade analysis (idle time, monthly breakdown, re-entry detection)
-  python %(prog)s report.html --analyze
-
-  # Window analysis (see "windows --help" for details)
-  python %(prog)s report.html windows --count 4
-  python %(prog)s report.html windows --count 6 --json
+  # Window analysis: 6 monthly windows for a 1.5y backtest
+  %(prog)s windows jobs/foo/ReportTester-*.html --count 6 --json -o windows.json
+  %(prog)s windows jobs/foo/ReportTester-*.html --count 4 -o windows.txt
 """,
     )
-    parser.add_argument("report", help="Path to HTML report file")
-    parser.add_argument("--json", action="store_true", help="Output as JSON")
-    parser.add_argument("--analyze", action="store_true",
-                        help="Run trade analysis (pair deals, risk check, monthly breakdown)")
-    sub = parser.add_subparsers(dest="cmd")
+    sub = parser.add_subparsers(dest="cmd", metavar="SUB_COMMAND", required=True)
 
+    def _add_shared(sub_parser):
+        """Add the flags every sub-command understands."""
+        sub_parser.add_argument(
+            "report", help="Path to HTML report file",
+        )
+        sub_parser.add_argument(
+            "--json", action="store_true",
+            help="Emit JSON instead of the default text report",
+        )
+        sub_parser.add_argument(
+            "-o", "--output", dest="output", default=None, metavar="OUTPUT_FILE",
+            help="Write output to OUTPUT_FILE (default: stdout).",
+        )
+
+    # ── report ──
+    p_report = sub.add_parser(
+        "report",
+        help="Default text report (env card + key statistics + trade summary).",
+        description="Default text report: env card (EA / Symbol / Period / "
+                    "company / deposit), key statistics (profit, PF, EP, RF, "
+                    "Sharpe, drawdown, etc.), and trade summary. Use `analyze` "
+                    "for the full idle-time / monthly / re-entry breakdown.",
+    )
+    _add_shared(p_report)
+
+    # ── analyze ──
+    p_an = sub.add_parser(
+        "analyze",
+        help="Full trade analysis (idle time, monthly breakdown, re-entry detection).",
+        description="Full trade analysis: pair deals into trades, compute risk per "
+                    "trade, monthly breakdown, re-entry detection, streak analysis. "
+                    "Emit JSON when --json is set.",
+    )
+    _add_shared(p_an)
+
+    # ── windows ──
     p_win = sub.add_parser(
         "windows",
         help="Split the backtest into N equal time windows and compute "
@@ -1372,31 +1535,30 @@ Examples:
         epilog="""
 Examples:
   # N=1: validate that calculation matches the full report
-  python parse_tester_report.py <report.html> windows --count 1
+  %(prog)s windows INPUT_FILE --count 1
 
   # N=4: quarterly analysis for a 1.5y backtest
-  python parse_tester_report.py <report.html> windows --count 4
+  %(prog)s windows INPUT_FILE --count 4
 
   # N=8: finer granularity
-  python parse_tester_report.py <report.html> windows --count 8
+  %(prog)s windows INPUT_FILE --count 8
 
   # JSON output (per-window metrics + z-score outliers)
-  python parse_tester_report.py <report.html> windows --count 6 --json
+  %(prog)s windows INPUT_FILE --count 6 --json -o windows.json
 
 Each window shows all 7 metrics plus an outlier flag (|z|>=2: notable,
 |z|>=5: extreme). The MEAN/STD row gives the reference distribution.
 """,
     )
+    _add_shared(p_win)
     p_win.add_argument(
         "--count", "-n", type=int, required=True,
         help="Number of equal time windows to split the backtest into. "
              "Use 1 to validate: should match the full report within tolerance.",
     )
-    p_win.add_argument(
-        "--json", action="store_true", help="Output windows data as JSON",
-    )
 
     args = parser.parse_args()
+    output_path = getattr(args, "output", None)
 
     path = Path(args.report)
     if not path.exists():
@@ -1405,10 +1567,30 @@ Each window shows all 7 metrics plus an outlier flag (|z|>=2: notable,
 
     report = parse_report(path)
 
+    # ── dispatch ──
+    if args.cmd == "report":
+        if args.json:
+            _emit_json(asdict(report), output_path)
+        else:
+            text = _capture_stdout(print_report, report)
+            _emit_text(text, output_path)
+        return
+
+    if args.cmd == "analyze":
+        analyze_data = analyze_report(report)
+        if args.json:
+            report_dict = asdict(report)
+            report_dict["analyze"] = analyze_data
+            _emit_json(report_dict, output_path)
+        else:
+            text = _capture_stdout(print_report, report, analyze_data)
+            _emit_text(text, output_path)
+        return
+
     if args.cmd == "windows":
         wins = compute_windows(report, args.count)
         comp = windows_comparison(wins)
-        if getattr(args, "json", False):
+        if args.json:
             out = {
                 "report": {
                     "expert": report.settings.expert,
@@ -1426,21 +1608,14 @@ Each window shows all 7 metrics plus an outlier flag (|z|>=2: notable,
                 "windows": wins,
                 "comparison": comp,
             }
-            print(json.dumps(out, indent=2, ensure_ascii=False))
+            _emit_json(out, output_path)
         else:
-            print_windows(report, wins, comp)
+            text = _capture_stdout(print_windows, report, wins, comp)
+            _emit_text(text, output_path)
         return
 
-    # Default behaviour: text report (with analyze) or JSON
-    analyze_data = analyze_report(report)
-    if args.analyze:
-        report_dict = asdict(report)
-        report_dict["analyze"] = analyze_data
-        print(json.dumps(report_dict, indent=2, ensure_ascii=False))
-    elif args.json:
-        print(json.dumps(asdict(report), indent=2, ensure_ascii=False))
-    else:
-        print_report(report, analyze_data)
+    # argparse with required=True guarantees we never get here.
+    parser.error(f"unknown sub-command: {args.cmd}")
 
 
 if __name__ == "__main__":

@@ -8,10 +8,18 @@ Two symbol types:
     (but profit currency = JPY, so dollar-equivalent needs conversion)
 
 Bid prices used:  XAUUSD=4121.28,  USDJPY=161.561
+
+Target CLI layout:
+  verify_sl_tp_formulas.py [--help] verify [SYMBOL ...] [-o OUTPUT_FILE]
+
+Where [SYMBOL ...] is one or more symbol names (default: XAUUSD USDJPY).
+Use -o OUTPUT_FILE to write the report to a file instead of stdout.
 """
 
 from __future__ import annotations
+import argparse
 import csv
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -307,93 +315,242 @@ def run_tests(
 
 # ── Main ─────────────────────────────────────────────────────────────
 
-def main():
+# Default bid prices used in the verification (chosen to be representative;
+# the formulas don't depend on the bid value but the report does).
+_DEFAULT_BIDS = {"XAUUSD": 4121.28, "USDJPY": 161.561}
+
+_VALID_SUBCOMMANDS = {"verify"}
+
+
+def _validate_argv_position(argv: list[str], prog: str = "") -> None:
+    """Reject any argv layout where the sub-command is NOT the first token.
+
+    Target layout — mandatory:
+        {prog} [--help] SUB_COMMAND [SYMBOL ...] [-o OUTPUT_FILE]
+
+    Mirrors the validator in parse_optimizer_report.py / parse_tester_report.py
+    so the project's scripts all share the same CLI rules.
+    """
+    if argv in ([], ["--help"], ["-h"]):
+        return
+    if argv and argv[0] in ("--help", "-h"):
+        return
+    if not argv or argv[0].startswith("-"):
+        print(
+            f"Error: {prog} requires a sub-command as the first argument.\n"
+            f"  Expected layout:  {prog} SUB_COMMAND [SYMBOL ...] [-o OUTPUT_FILE]\n"
+            f"  Valid sub-commands: {', '.join(sorted(_VALID_SUBCOMMANDS))}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    sub = argv[0]
+    if sub not in _VALID_SUBCOMMANDS:
+        if sub.startswith("-"):
+            print(
+                f"Error: flags must come AFTER the sub-command.\n"
+                f"  Expected layout:  {prog} SUB_COMMAND [SYMBOL ...] [-o OUTPUT_FILE]\n"
+                f"  Got: {' '.join(argv)}\n"
+                f"  Valid sub-commands: {', '.join(sorted(_VALID_SUBCOMMANDS))}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(
+            f"Error: unknown sub-command '{sub}'.\n"
+            f"  Expected layout:  {prog} SUB_COMMAND [SYMBOL ...] [-o OUTPUT_FILE]\n"
+            f"  Valid sub-commands: {', '.join(sorted(_VALID_SUBCOMMANDS))}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _capture_stdout(func, *args, **kwargs) -> str:
+    """Run ``func`` while capturing what it prints; return that as a string."""
+    import io
+    buf = io.StringIO()
+    saved = sys.stdout
+    sys.stdout = buf
+    try:
+        func(*args, **kwargs)
+    finally:
+        sys.stdout = saved
+    return buf.getvalue()
+
+
+def main(argv: list[str] | None = None) -> None:
+    prog = Path(sys.argv[0]).name
+    _validate_argv_position(sys.argv[1:], prog=prog)
+    parser = argparse.ArgumentParser(
+        description="Verify SL/TP calculation formulas from MQL5 documentation",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Target CLI layout:
+  %(prog)s [--help] verify [SYMBOL ...] [-o OUTPUT_FILE]
+
+Examples:
+  # Default: run all bundled symbols (XAUUSD, USDJPY), print to stdout
+  %(prog)s verify
+
+  # Run a single symbol, write output to a file
+  %(prog)s verify XAUUSD -o verify_xauusd.txt
+
+  # Run both bundled symbols, write output to a file
+  %(prog)s verify XAUUSD USDJPY -o verify_all.txt
+
+Available bundled symbols: XAUUSD, USDJPY.
+Bids are taken from a hardcoded reference set (XAUUSD=4121.28, USDJPY=161.561).
+""",
+    )
+    sub = parser.add_subparsers(dest="cmd", metavar="SUB_COMMAND", required=True)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="Run the SL/TP formula verification tests for one or more symbols.",
+        description="Run the bundled SL/TP formula verification suite for one "
+                    "or more symbol names (default: XAUUSD USDJPY). Each symbol "
+                    "is loaded from references/symbol-spec/<NAME>.csv and "
+                    "exercised through four tests: SL→Profit round-trip, "
+                    "Risk%%→SL forward direction, fixed-SL→Lots reverse, and "
+                    "forward↔reverse cross-verification. Plus a bonus "
+                    "USDJPY-currency walkthrough and a XAUUSD lots-sensitivity "
+                    "sweep.",
+    )
+    p_verify.add_argument(
+        "symbols", nargs="*", default=["XAUUSD", "USDJPY"],
+        metavar="SYMBOL",
+        help="One or more symbol names from references/symbol-spec/. "
+             "Default (when omitted): XAUUSD USDJPY.",
+    )
+    p_verify.add_argument(
+        "-o", "--output", dest="output", default=None, metavar="OUTPUT_FILE",
+        help="Write the verification report to OUTPUT_FILE "
+             "(default: stdout).",
+    )
+
+    args = parser.parse_args(argv)
+
+    if args.cmd != "verify":
+        parser.error(f"unknown sub-command: {args.cmd}")
+
     BALANCE = 10000.0  # USD demo account
 
-    specs = {
-        "XAUUSD": SymbolSpec.from_csv(SPEC_DIR / "specs-XAUUSD.csv"),
-        "USDJPY": SymbolSpec.from_csv(SPEC_DIR / "specs-USDJPY.csv"),
-    }
-    bids = {"XAUUSD": 4121.28, "USDJPY": 161.561}
+    specs: dict[str, SymbolSpec] = {}
+    bids: dict[str, float] = {}
+    for name in args.symbols:
+        csv_path = SPEC_DIR / f"specs-{name}.csv"
+        if not csv_path.exists():
+            print(
+                f"Error: no symbol-spec CSV for '{name}' "
+                f"(expected at {csv_path})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        specs[name] = SymbolSpec.from_csv(csv_path)
+        if name in _DEFAULT_BIDS:
+            bids[name] = _DEFAULT_BIDS[name]
+        else:
+            # Fallback bid of 0.0; the SL→Profit round-trip still works
+            # but Risk%→SL walkthroughs need a positive bid. Warn.
+            bids[name] = 0.0
+            print(
+                f"Warning: '{name}' has no bundled bid price; using 0.0. "
+                f"Risk%→SL walkthroughs may yield non-meaningful numbers.",
+                file=sys.stderr,
+            )
 
     # FX rates: profit_currency per 1 USD
     # XAUUSD: profit=USD → rate=1.0
     # USDJPY: profit=JPY → rate=USDJPY_bid
-    fx_rates = {"XAUUSD": 1.0, "USDJPY": bids["USDJPY"]}
+    fx_rates: dict[str, float] = {}
+    for name in args.symbols:
+        spec = specs[name]
+        if spec.profit_currency.upper() == "USD":
+            fx_rates[name] = 1.0
+        else:
+            # profit_currency per 1 USD = bid (for FX; good enough for the demo)
+            fx_rates[name] = bids[name]
 
-    print("=" * 72)
-    print("  MQL5 SL/TP Formula Verification")
-    print(f"  Account Balance: {BALANCE:,.2f} USD")
-    print("=" * 72)
+    def render_report() -> str:
+        """Run the full verification report; return it as a string."""
+        import io
+        buf = io.StringIO()
+        saved = sys.stdout
+        sys.stdout = buf
+        try:
+            print("=" * 72)
+            print("  MQL5 SL/TP Formula Verification")
+            print(f"  Account Balance: {BALANCE:,.2f} USD")
+            print("=" * 72)
 
-    for name in ["XAUUSD", "USDJPY"]:
-        run_tests(specs[name], bids[name], BALANCE, fx_rates[name])
+            for name in args.symbols:
+                run_tests(specs[name], bids[name], BALANCE, fx_rates[name])
 
-    # ─────────────────────────────────────────────────────────────────
-    # Special: USDJPY — currency conversion walkthrough
-    # ─────────────────────────────────────────────────────────────────
-    print(SEP)
-    print("  USDJPY: Currency Conversion Walkthrough")
-    print(SEP)
-    jpy_spec = specs["USDJPY"]
-    jpy_rate = bids["USDJPY"]
-    lots = 0.10
-    risk_pct = 1.0
+            if "USDJPY" in specs:
+                # Special: USDJPY — currency conversion walkthrough
+                print(SEP)
+                print("  USDJPY: Currency Conversion Walkthrough")
+                print(SEP)
+                jpy_spec = specs["USDJPY"]
+                jpy_rate = bids["USDJPY"]
+                _lots, _risk_pct = 0.10, 1.0
 
-    # Step 1-2: risk budget in profit currency
-    target_usd = BALANCE * risk_pct / 100.0           # = 100.00 USD
-    target_jpy = target_usd * jpy_rate                 # = 16,156.10 JPY
+                target_usd = BALANCE * _risk_pct / 100.0           # = 100.00 USD
+                target_jpy = target_usd * jpy_rate                 # = 16,156.10 JPY
 
-    # Step 3: formula → SL
-    ml_jpy = risk_amount(BALANCE, risk_pct, jpy_spec, jpy_rate)
-    sl_fwd = calc_sl_from_risk(jpy_spec, ml_jpy, lots, bids["USDJPY"], "BUY")
+                ml_jpy = risk_amount(BALANCE, _risk_pct, jpy_spec, jpy_rate)
+                sl_fwd = calc_sl_from_risk(jpy_spec, ml_jpy, _lots, bids["USDJPY"], "BUY")
 
-    # Step 4-5: verify
-    loss_jpy = calc_profit(jpy_spec, lots, bids["USDJPY"], sl_fwd)
-    loss_usd = loss_jpy / jpy_rate
+                loss_jpy = calc_profit(jpy_spec, _lots, bids["USDJPY"], sl_fwd)
+                loss_usd = loss_jpy / jpy_rate
 
-    print(f"  Risk={risk_pct}%, Lots={lots}, Balance={fmt(BALANCE, 2)} USD")
-    print()
-    print(f"  Step 1: risk budget (USD)  = {fmt(BALANCE, 2)} × {risk_pct}% = {fmt(target_usd, 2)} USD")
-    print(f"  Step 2: convert to JPY     = {fmt(target_usd, 2)} × {jpy_rate} = {fmt(target_jpy, 2)} JPY")
-    print(f"  Step 3: points = budget / (PointValue × Lots)")
-    print(f"          = {fmt(target_jpy, 2)} / ({point_value(jpy_spec):.1f} × {lots}) = {target_jpy / (point_value(jpy_spec) * lots):.1f} pts")
-    print(f"          SL dist = {target_jpy / (point_value(jpy_spec) * lots):.1f} x {jpy_spec.point} = "
-          f"{target_jpy / (point_value(jpy_spec) * lots) * jpy_spec.point:.4f} price")
-    print(f"          SL = {bids['USDJPY']} - {target_jpy / (point_value(jpy_spec) * lots) * jpy_spec.point:.4f} = "
-          f"{fmt(sl_fwd, jpy_spec.digits)}")
-    print()
-    print(f"  Step 4: actual loss = {fmt(loss_jpy, 2)} JPY")
-    print(f"  Step 5: loss in USD = {fmt(loss_jpy, 2)} / {jpy_rate} = {fmt(loss_usd, 2)} USD")
-    print()
-    print(f"  Result: target {fmt(target_usd, 2)} USD ≈ actual {fmt(loss_usd, 2)} USD  "
-          f"(diff={fmt(abs(loss_usd) - target_usd, 4)} USD, "
-          f"from NormalizeDouble rounding)")
-    print()
+                print(f"  Risk={_risk_pct}%, Lots={_lots}, Balance={fmt(BALANCE, 2)} USD")
+                print()
+                print(f"  Step 1: risk budget (USD)  = {fmt(BALANCE, 2)} × {_risk_pct}% = {fmt(target_usd, 2)} USD")
+                print(f"  Step 2: convert to JPY     = {fmt(target_usd, 2)} × {jpy_rate} = {fmt(target_jpy, 2)} JPY")
+                print(f"  Step 3: points = budget / (PointValue × Lots)")
+                print(f"          = {fmt(target_jpy, 2)} / ({point_value(jpy_spec):.1f} × {_lots}) = {target_jpy / (point_value(jpy_spec) * _lots):.1f} pts")
+                print(f"          SL dist = {target_jpy / (point_value(jpy_spec) * _lots):.1f} x {jpy_spec.point} = "
+                      f"{target_jpy / (point_value(jpy_spec) * _lots) * jpy_spec.point:.4f} price")
+                print(f"          SL = {bids['USDJPY']} - {target_jpy / (point_value(jpy_spec) * _lots) * jpy_spec.point:.4f} = "
+                      f"{fmt(sl_fwd, jpy_spec.digits)}")
+                print()
+                print(f"  Step 4: actual loss = {fmt(loss_jpy, 2)} JPY")
+                print(f"  Step 5: loss in USD = {fmt(loss_jpy, 2)} / {jpy_rate} = {fmt(loss_usd, 2)} USD")
+                print()
+                print(f"  Result: target {fmt(target_usd, 2)} USD ≈ actual {fmt(loss_usd, 2)} USD  "
+                      f"(diff={fmt(abs(loss_usd) - target_usd, 4)} USD, "
+                      f"from NormalizeDouble rounding)")
+                print()
 
-    # ─────────────────────────────────────────────────────────────────
-    # Special: XAUUSD lots sensitivity for 1% risk
-    # ─────────────────────────────────────────────────────────────────
-    print(SEP)
-    print("  XAUUSD: Lots vs SL distance for 1% risk ($100 target loss)")
-    print(SEP)
-    xau = specs["XAUUSD"]
-    ml_usd = risk_amount(BALANCE, 1.0, xau, 1.0)
-    for lots in [0.01, 0.05, 0.10, 0.50, 1.00, 2.00]:
-        pv = point_value(xau)
-        points = ml_usd / (pv * lots)
-        sl_dist_price = points * xau.point
-        sl_dist_pts = int(points)
-        sl = round(bids["XAUUSD"] - sl_dist_price, xau.digits)
+            if "XAUUSD" in specs:
+                # Special: XAUUSD lots sensitivity for 1% risk
+                print(SEP)
+                print("  XAUUSD: Lots vs SL distance for 1% risk ($100 target loss)")
+                print(SEP)
+                xau = specs["XAUUSD"]
+                ml_usd = risk_amount(BALANCE, 1.0, xau, 1.0)
+                for lots in [0.01, 0.05, 0.10, 0.50, 1.00, 2.00]:
+                    pv = point_value(xau)
+                    points = ml_usd / (pv * lots)
+                    sl_dist_price = points * xau.point
+                    sl_dist_pts = int(points)
+                    sl = round(bids["XAUUSD"] - sl_dist_price, xau.digits)
 
-        # Verify
-        actual_loss = calc_profit(xau, lots, bids["XAUUSD"], sl)
+                    actual_loss = calc_profit(xau, lots, bids["XAUUSD"], sl)
 
-        print(f"    Lots={lots:>5.2f}  "
-              f"SL dist={sl_dist_pts:>6} pts ({sl_dist_price:.2f} price)  "
-              f"SL={fmt(sl, xau.digits)}  "
-              f"loss={fmt(actual_loss, 2)} USD  "
-              f"diff={fmt(abs(actual_loss) - ml_usd, 6)}")
+                    print(f"    Lots={lots:>5.2f}  "
+                          f"SL dist={sl_dist_pts:>6} pts ({sl_dist_price:.2f} price)  "
+                          f"SL={fmt(sl, xau.digits)}  "
+                          f"loss={fmt(actual_loss, 2)} USD  "
+                          f"diff={fmt(abs(actual_loss) - ml_usd, 6)}")
+        finally:
+            sys.stdout = saved
+        return buf.getvalue()
+
+    text = render_report()
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+    else:
+        sys.stdout.write(text)
 
 
 if __name__ == "__main__":

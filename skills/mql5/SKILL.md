@@ -526,6 +526,44 @@ wine MetaEditor64.exe /compile:"MQL5/Experts/MyEA.mq5" /log /s    # syntax check
 ```
 Log file: same directory as source, same name with `.log` extension.
 
+#### Script CLI conventions (mandatory)
+
+The Python scripts under `scripts/` (excluding `mql5_helper.py`, which
+already follows this layout) share a single CLI layout enforced by a
+pre-argparse position validator:
+
+```
+{python|uv run} scripts/SCRIPT.py [--help] SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]
+```
+
+Rules enforced by the validator (any violation is rejected with a clear
+error before argparse even runs):
+
+1. **The sub-command is the first non-flag token** — `--json` / `-o` /
+   `--sigma` etc. must appear AFTER `SUB_COMMAND INPUT_FILE`. Calling
+   the script with no sub-command, with a leading flag (`*.py --json FILE`),
+   or in the legacy `*.py FILE` form is rejected with a message naming
+   the valid sub-commands.
+2. **The input file must immediately follow the sub-command** — passing
+   only the sub-command with no file (e.g. `*.py failures`) is rejected
+   with a message showing the expected layout.
+3. **`-o OUTPUT_FILE` is optional and writes the report to disk instead
+   of stdout** — works for every sub-command of every parsing script.
+   Combine with `--json` to write a JSON file (encoding is auto-detected
+   by `--json`, not by file extension).
+
+The four parsing scripts and their sub-commands:
+
+| Script | Sub-commands |
+|--------|--------------|
+| `scripts/parse_tester_report.py` | `report`, `analyze`, `windows` |
+| `scripts/parse_optimizer_report.py` | `report`, `analyze`, `outliers`, `failures` |
+| `scripts/verify_sl_tp_formulas.py` | `verify [SYMBOL ...]` |
+| `scripts/mql5_helper.py` | `compile`, `check`, `deploy`, `status`, `list` |
+
+Run `*.py --help` for the full synopsis (the layout hint and the
+sub-command catalogue are printed under the help epilog).
+
 ### OnTester Handler
 
 ```mql5
@@ -757,9 +795,9 @@ TimeCurrent(dt);
 #### 12. Deal-Level Debugging Methodology
 
 When summary metrics reveal problems, drill into individual trades.
-Use `scripts/parse_tester_report.py --analyze` for automated analysis
+Use `scripts/parse_tester_report.py analyze` for automated analysis
 (pairs deals, computes risk per trade, monthly breakdown, re-entry
-detection, streak analysis). For raw data, use `--json` instead.
+detection, streak analysis). For raw data, use `report --json` instead.
 
 1. **Pair deals**: Iterate deals, pair each `direction=in` with the next
    `direction=out` to form a complete trade (entry price, exit price, P&L,
@@ -787,8 +825,8 @@ the backtest into N equal time windows and recompute the same 7
 metrics per window:
 
 ```bash
-python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count 4
-python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count 6 --json
+python skills/mql5/scripts/parse_tester_report.py windows REPORT.html --count 4
+python skills/mql5/scripts/parse_tester_report.py windows REPORT.html --count 6 --json
 ```
 
 Each window is flagged `▲2σ`, `■EXT`, or `-` based on the per-metric
@@ -838,19 +876,32 @@ Optimization exports a different artifact: a single-worksheet XML-tagged
 Excel workbook (`ReportOptimizer-*.xml`, also openable in LibreOffice Calc).
 Each row is one parameter pass; the first worksheet name is
 `Tester Optimizator Results`. Use `scripts/parse_optimizer_report.py` to
-extract and analyze it. Top-level modes:
+extract and analyze it. Mandatory CLI layout:
 
-```bash
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml --json
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml --analyze
+```
+python skills/mql5/scripts/parse_optimizer_report.py SUB_COMMAND INPUT_FILE [OPTIONS] [-o OUTPUT_FILE]
 ```
 
-Plus a subcommand:
+Sub-commands:
 
 ```bash
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers [--sigma 2] [--top-outliers 10] [--top-normal 5] [--sort ABBR_LIST] [--json]
+# Default text report (env card + parameter cardinalities)
+python skills/mql5/scripts/parse_optimizer_report.py report REPORT.xml -o report.txt
+
+# Full optimization analysis (parameter effect, duplicates, best passes, trade distribution)
+python skills/mql5/scripts/parse_optimizer_report.py analyze REPORT.xml --json -o analysis.json
+
+# Per-pass z-score outlier scan on the 8 performance metrics
+python skills/mql5/scripts/parse_optimizer_report.py outliers REPORT.xml [--sigma 2] [--top-outliers 10] [--top-normal 5] [--sort ABBR_LIST] [--json]
+
+# Failure-set analysis: per-parameter value distribution over passes that fail at least one of 6 absolute criteria
+python skills/mql5/scripts/parse_optimizer_report.py failures REPORT.xml [--json] [-o OUTPUT_FILE]
 ```
+
+Every sub-command accepts `--json` (emit JSON instead of text) and
+`-o OUTPUT_FILE` (write to a file instead of stdout). For `analyze`,
+`outliers`, and `failures`, add `--json` when piping the output
+downstream; for human reading, omit `--json` and pipe to `less`.
 
 The `outliers` subcommand does a per-pass z-score scan on the 8
 performance metrics and splits passes into "strongly-strong" (Set A,
@@ -1007,19 +1058,19 @@ performance metrics.
 
 ```
 # Default: σ=2.0, top 10 outlier passes, top 5 normal passes
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers
+python skills/mql5/scripts/parse_optimizer_report.py outliers REPORT.xml
 
 # Custom sort: priority by ExpectedPayoff, RecoveryFactor, Result, Profit
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers --sort EP,RF,R,P
+python skills/mql5/scripts/parse_optimizer_report.py outliers REPORT.xml --sort EP,RF,R,P
 
 # Single priority metric; rest in default order
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers --sort DD
+python skills/mql5/scripts/parse_optimizer_report.py outliers REPORT.xml --sort DD
 
 # Tighter threshold + custom top-N
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers --sigma 2.5 --top-outliers 5
+python skills/mql5/scripts/parse_optimizer_report.py outliers REPORT.xml --sigma 2.5 --top-outliers 5
 
-# JSON for further processing
-python skills/mql5/scripts/parse_optimizer_report.py ReportOptimizer-*.xml outliers --json
+# JSON for further processing (with -o for file output)
+python skills/mql5/scripts/parse_optimizer_report.py outliers REPORT.xml --json -o outliers.json
 ```
 
 **The 8 performance metrics scanned** are everything in `METRIC_COLS`
@@ -1109,6 +1160,89 @@ EA-agnostic:
   starts with `Inp`. So an EA that names parameters `StopLoss`,
   `TakeProfit`, `UseNewsFilter` is parsed correctly without any
   script changes.
+
+#### 11. Failure-Set Analysis
+
+`outliers` answers *"which individual passes are statistical extremes?"*;
+`failures` answers *"which parameter values concentrate in the deployable
+failures?"* — passes that satisfy at least one of 6 absolute (run-independent)
+criteria:
+
+```
+Profit           < 0      (the EA bled money on the run)
+Profit Factor    < 1.0    (gross loss ≥ gross profit)
+Expected Payoff  < 0.1    (avg trade outcome is negligible)
+Equity DD %      > 60.0   (drawdown exceeded 60% of equity — capital risk)
+Recovery Factor  < 1      (net profit does not cover max drawdown — fragile; deployable EAs typically need RF ≥ 2)
+Sharpe Ratio     < 1.0    (per-trade returns aren't distinguishable from noise)
+```
+
+The thresholds are intentionally NOT z-scored: a pass satisfying every
+criterion is deployment-grade on absolute terms, not only relative to this
+run. For each input parameter column, the script tabulates the **count and
+percentage of failing passes** holding each value (share of the failure set)
+plus `pct_of_global` (share of all passes with that value that ended up
+failing — a concentration measure).
+
+```
+python skills/mql5/scripts/parse_optimizer_report.py failures REPORT.xml
+python skills/mql5/scripts/parse_optimizer_report.py failures REPORT.xml --json -o failures.json
+```
+
+**How to read the output:**
+
+```
+Passes total:     432
+Passes failing:   420  (97.22% of total)        ← overall failure rate
+Passes passing:    12
+
+Criteria table (any one fires ⇒ failing):
+  Profit < 0.0                            14   3.24%
+  Profit Factor < 1.0                     14   3.24%
+  Expected Payoff < 0.1                   16   3.70%
+  Equity DD % > 60.0                       0   0.00%   ← not triggered
+  Recovery Factor < 1                     420  97.22%   ← DOMINANT driver (was the dominant driver at < 1.5 too — same passes fail since all RF<1.5 is a subset of RF<1)
+  Sharpe Ratio < 1.0                      18   4.17%
+```
+
+The criterion that fires most often is the system's **release blocker** —
+in the example above, RF < 1 fires on 97% of passes; that means the
+optimization grid is dominated by an RF<1 ground, and tuning within it
+won't get you a deployable EA. Either widen the parameter search range
+(tighter SLs, asymmetric risk) or change the underlying EA logic.
+
+Per-parameter value distribution (one row per parameter):
+
+```
+Parameter: InpRiskPercent (5 distinct values in failure set)
+  value  count  pct_of_failures  global_count  pct_of_global
+   1       10         2.4%            18        55.6%   ← 5/10 pass with Risk=1 fail: medium concentration
+   2       18         4.3%            50        36.0%   ← lower failure rate at this risk level
+   3       80        19.0%            80       100.0%   ← smoking gun: every Risk=3 pass fails
+   ...
+```
+
+`pct_of_global` is the **concentration signal**:
+
+- >50% on a single value → almost every pass with that setting fails.
+  This is a **smoking gun** — drop the value from the optimization grid
+  (it never works) or treat it as a fundamental bug in the EA.
+- 0–30% → value is roughly as good/bad as average; sampling noise.
+- All values clustered at a similar % → the parameter is not the
+  differentiator; look elsewhere.
+
+**When to use `failures` vs `outliers`**:
+
+- `outliers` ranks **extreme passes** — useful when you have a run
+  with hundreds of passes and want to know which ~10 deserve hand
+  inspection.
+- `failures` ranks **parameter values** — useful when you want to
+  prune the optimization grid (drop values with high `pct_of_global`)
+  or when you suspect a structural problem (one criterion dominating).
+- Both views are complementary: check `failures` first to identify
+  systematic issues (e.g. RiskPercent axis, dominant criterion),
+  then `outliers` to inspect specific passes inside the surviving
+  parameter region.
 
 ## 7. Event Handlers Reference
 
@@ -1341,7 +1475,7 @@ double OnTester() {
 - `references/symbol-spec/` — Symbol specification CSVs (broker-specific)
   - `specs-XAUUSD.csv` — XAUUSD: CFD Leverage, ContractSize=100, Digits=2
   - `specs-USDJPY.csv` — USDJPY: Forex, ContractSize=100000, Digits=3
-- `scripts/verify_sl_tp_formulas.py` — Python verification of SL/TP risk formulas
+- `scripts/verify_sl_tp_formulas.py` — Python verification of SL/TP risk formulas (CLI: `verify_sl_tp_formulas.py verify [SYMBOL ...] [-o OUTPUT_FILE]`)
 
 ### External
 
