@@ -13,3 +13,5 @@ ReportTester*.*
 !ReportTester-600xxxxx-holding.png
 !ReportTester-600xxxxx-hst.png
 !ReportTester-600xxxxx-mfemae.png
+
+.hermes/
