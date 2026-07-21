@@ -880,6 +880,8 @@ def compute_window_metrics(
     starting_balance: float,
     deposit: float,
     backtest_days: float,
+    t_start: datetime | None = None,
+    t_end: datetime | None = None,
 ) -> dict:
     """Compute the 7-window-metrics for a list of trades.
 
@@ -889,15 +891,64 @@ def compute_window_metrics(
     balance-based relative DD calculation).
     `backtest_days` is the window length in days (used for Sharpe
     annualization).
+    `t_start` / `t_end` (window boundaries as datetime) are optional —
+    when supplied, seven additional fields are computed:
+      idle_seconds     — total seconds in this window NOT held in any
+                        trade. Computed as the sum of free intervals
+                        (the complement of merged in-position
+                        intervals); equals window_seconds minus the
+                        union of clipped in-position intervals (NOT
+                        the sum of clipped durations, so it stays
+                        correct when trade stack depth > 1).
+      min_idle_seconds — shortest free interval in this window.
+                        Equal to window_seconds when no trades.
+      max_idle_seconds — longest free interval in this window.
+                        Equal to window_seconds when no trades.
+      avg_idle_seconds — arithmetic mean of free interval lengths.
+                        Equal to window_seconds when no trades.
+      min_hold_seconds — shortest single-trade raw holding duration
+                        (close_time - open_time, NO window clipping)
+                        among this window's trades. 0 when empty.
+                        Matches the report's "Minimal position
+                        holding time" when N=1.
+      max_hold_seconds — longest single-trade raw holding duration
+                        (close_time - open_time, NO window clipping)
+                        among this window's trades. 0 when empty.
+                        Matches the report's "Maximal position
+                        holding time" when N=1.
+      avg_hold_seconds — arithmetic mean of raw trade holding
+                        durations (close_time - open_time) for this
+                        window's trades. 0 when empty. Matches the
+                        report's "Average position holding time" when
+                        N=1.
+      win_rate         — fraction of in-window trades with net > 0,
+                        i.e. win count / total exits in this window.
+                        0 when no trades.
+
+    Note: holding-time fields (min/max/avg) intentionally use the
+    trade's RAW (close_time - open_time), not the window-clipped
+    duration. This mirrors MT5's report semantics: "Maximal position
+    holding time" is the trade's full lifetime, not "how long was
+    this trade present inside the window".
+
+    Idle fields (idle/min_idle/max_idle/avg_idle) are derived from
+    free intervals — the complement of merged in-position intervals —
+    so they correctly handle trade stack depth > 1 (multiple
+    simultaneous positions). For depth=1 the merged-interval
+    decomposition is identical to a simpler "gap between consecutive
+    trades" model.
 
     Returns a dict with keys: profit, expected_payoff, profit_factor,
     recovery_factor (based on bal_dd_rel_abs), bal_dd_rel_pct,
     bal_dd_rel_abs, trades, sharpe_ratio (annualized),
-    sharpe_ratio_raw (per-trade).
+    sharpe_ratio_raw (per-trade), plus idle_seconds / min_idle_seconds
+    / max_idle_seconds / avg_idle_seconds / min_hold_seconds /
+    max_hold_seconds / avg_hold_seconds / win_rate when t_start and
+    t_end are provided.
     """
     n = len(trades)
     if n == 0:
-        return {
+        result = {
             "profit": 0.0,
             "expected_payoff": 0.0,
             "profit_factor": 0.0,
@@ -908,6 +959,17 @@ def compute_window_metrics(
             "sharpe_ratio": 0.0,
             "sharpe_ratio_raw": 0.0,
         }
+        if t_start is not None and t_end is not None:
+            window_seconds = max(0.0, (t_end - t_start).total_seconds())
+            result["idle_seconds"] = window_seconds
+            result["min_idle_seconds"] = window_seconds
+            result["max_idle_seconds"] = window_seconds
+            result["avg_idle_seconds"] = window_seconds
+            result["min_hold_seconds"] = 0.0
+            result["max_hold_seconds"] = 0.0
+            result["avg_hold_seconds"] = 0.0
+            result["win_rate"] = 0.0
+        return result
 
     # Per-trade P&L
     # Use MT5's STAT_GROSS_PROFIT/STAT_GROSS_LOSS split (entry costs
@@ -937,7 +999,7 @@ def compute_window_metrics(
     sharpe_raw = _sharpe_ratio(hprs)
     sharpe_ann = _sharpe_ratio_annualized(hprs, backtest_days)
 
-    return {
+    result = {
         "profit": round(profit, 2),
         "expected_payoff": round(expected_payoff, 2),
         "profit_factor": round(profit_factor, 2),
@@ -948,6 +1010,113 @@ def compute_window_metrics(
         "sharpe_ratio": round(sharpe_ann, 2),
         "sharpe_ratio_raw": round(sharpe_raw, 4),
     }
+
+    # Idle time + max hold + win rate (window-aware).
+    # Each trade contributes its in-position duration intersected with
+    # [t_start, t_end): clips open_time to >= t_start and close_time
+    # to <= t_end. Trades that don't overlap the window at all
+    # contribute 0 (already filtered by compute_windows via open_time
+    # window assignment, but the clipping is defensive in case a
+    # future caller passes an unsliced trade list).
+    if t_start is not None and t_end is not None:
+        in_position_seconds = 0.0
+        max_hold_seconds = 0.0
+        wins = 0
+        # Holding-time stats use RAW trade duration (close-open), not
+        # window-clipped. See docstring above for why.
+        min_hold_seconds: float | None = None
+        total_raw_hold = 0.0
+        raw_count = 0
+        # Collect window-clipped in-position intervals (used for
+        # idle-gap computation via sweep-line, accounting for trade
+        # stack depth > 1).
+        intervals: list[tuple[float, float]] = []
+        for t in trades:
+            try:
+                ot = datetime.strptime(t["open_time"], "%Y.%m.%d %H:%M:%S")
+                ct = datetime.strptime(t["close_time"], "%Y.%m.%d %H:%M:%S")
+            except (KeyError, ValueError):
+                continue
+            # Window-clipped duration (for idle accounting)
+            clipped_start = ot if ot > t_start else t_start
+            clipped_end = ct if ct < t_end else t_end
+            held = (clipped_end - clipped_start).total_seconds()
+            if held < 0:
+                held = 0.0
+            in_position_seconds += held
+            if held > max_hold_seconds:
+                max_hold_seconds = held
+            # Raw holding time (for min/max/avg stats)
+            raw_hold = (ct - ot).total_seconds()
+            if raw_hold < 0:
+                raw_hold = 0.0
+            if min_hold_seconds is None or raw_hold < min_hold_seconds:
+                min_hold_seconds = raw_hold
+            total_raw_hold += raw_hold
+            raw_count += 1
+            if t.get("net", 0.0) > 0:
+                wins += 1
+            # Only count the clipped portion as an interval for idle-gap
+            # decomposition (a trade entirely outside the window is
+            # filtered out by compute_windows already, but defensive).
+            if held > 0:
+                intervals.append((
+                    (clipped_start - t_start).total_seconds(),
+                    (clipped_end - t_start).total_seconds(),
+                ))
+        window_seconds = max(0.0, (t_end - t_start).total_seconds())
+        # Idle-gap decomposition: merge overlapping in-position
+        # intervals (handles stack depth > 1), then take the
+        # complement within [0, window_seconds]. The result is a list
+        # of free intervals; min/max/avg over their lengths gives
+        # the per-gap idle statistics. If no trades, the entire
+        # window is one free interval of length window_seconds.
+        if intervals:
+            intervals.sort(key=lambda x: (x[0], x[1]))
+            merged: list[list[float]] = [list(intervals[0])]
+            for s, e in intervals[1:]:
+                if s <= merged[-1][1]:
+                    if e > merged[-1][1]:
+                        merged[-1][1] = e
+                else:
+                    merged.append([s, e])
+            free_lengths: list[float] = []
+            cursor = 0.0
+            for s, e in merged:
+                if s > cursor:
+                    free_lengths.append(s - cursor)
+                cursor = max(cursor, e)
+            if cursor < window_seconds:
+                free_lengths.append(window_seconds - cursor)
+        else:
+            free_lengths = [window_seconds]
+        if free_lengths:
+            min_idle = min(free_lengths)
+            max_idle = max(free_lengths)
+            avg_idle = sum(free_lengths) / len(free_lengths)
+        else:
+            min_idle = max_idle = avg_idle = 0.0
+        # idle_seconds = sum of free lengths — should equal
+        # window_seconds - in_position_seconds when no trade overlap;
+        # can be smaller when trades overlap (overlap counted once in
+        # free complement but counted multiple times in in_position).
+        # We report the true geometric idle (sum of free lengths) and
+        # keep the legacy total_idle alias for backward compat.
+        idle_seconds = sum(free_lengths)
+        result["idle_seconds"] = round(idle_seconds, 1)
+        result["min_idle_seconds"] = round(min_idle, 1)
+        result["max_idle_seconds"] = round(max_idle, 1)
+        result["avg_idle_seconds"] = round(avg_idle, 1)
+        result["min_hold_seconds"] = round(
+            min_hold_seconds if min_hold_seconds is not None else 0.0, 1
+        )
+        result["max_hold_seconds"] = round(max_hold_seconds, 1)
+        result["avg_hold_seconds"] = round(
+            total_raw_hold / raw_count if raw_count else 0.0, 1
+        )
+        result["win_rate"] = round(wins / n, 4)
+
+    return result
 
 
 def _parse_period_dates(period: str) -> tuple[datetime | None, datetime | None]:
@@ -1042,11 +1211,15 @@ def compute_windows(
         start_bal = balance_at(t_start)
         end_bal = balance_at(t_end)
         window_days = (t_end - t_start).total_seconds() / 86400.0
-        m = compute_window_metrics(in_window, start_bal, deposit, window_days)
+        m = compute_window_metrics(
+            in_window, start_bal, deposit, window_days,
+            t_start=t_start, t_end=t_end,
+        )
         out.append({
             "window_idx": k,
             "t_start": t_start.strftime("%Y.%m.%d"),
             "t_end": t_end.strftime("%Y.%m.%d"),
+            "window_seconds": (t_end - t_start).total_seconds(),
             "start_balance": round(start_bal, 2),
             "end_balance": round(end_bal, 2),
             **m,
@@ -1196,6 +1369,53 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
               f"{days:>6.1f} {w['start_balance']:>10,.2f} {w['end_balance']:>10,.2f} "
               f"{w['trades']:>6}")
     print(f"  {'─'*76}\n")
+
+    # Time composition per window — Idle / Max-hold / Win-rate.
+    # Skipped silently if the windows list predates this field (i.e.
+    # if compute_windows was called without t_start/t_end, which only
+    # happens with hand-crafted test fixtures — production callers
+    # always pass them).
+    if all("idle_seconds" in w for w in windows):
+        # Per-window percentages are computed against each window's
+        # own length (idle_in_window / window_length), so they are
+        # NOT additive across windows — N windows can sum to N*100%
+        # in the worst case. The total row at the bottom aggregates
+        # in absolute time across all windows.
+        #
+        # window_seconds is reconstructed as idle + in_pos rather
+        # than parsing t_start/t_end with strptime('%Y.%m.%d'),
+        # because the stored t_start/t_end are date-only strings
+        # truncated from the real datetime boundaries — re-parsing
+        # them would round the window length down to whole days and
+        # drift the percentage by up to 1/2 day. The windowing code
+        # in compute_windows uses full-precision datetimes; pairing
+        # with idle_seconds keeps the ratio exact.
+        print(f"  {'Win':<4} {'Days':>6} {'MinIdle':>10} {'MaxIdle':>10} {'AvgIdle':>10} "
+              f"{'MinHold':>10} {'MaxHold':>10} {'AvgHold':>10} "
+              f"{'WinRate':>8}")
+        print("  " + "─" * 102)
+        for w in windows:
+            if "window_seconds" in w:
+                window_seconds = w["window_seconds"]
+            else:
+                t_s = datetime.strptime(w["t_start"], "%Y.%m.%d")
+                t_e = datetime.strptime(w["t_end"], "%Y.%m.%d")
+                window_seconds = max(1.0, (t_e - t_s).total_seconds())
+            min_idle = w["min_idle_seconds"]
+            max_idle = w["max_idle_seconds"]
+            avg_idle = w["avg_idle_seconds"]
+            min_hold = w["min_hold_seconds"]
+            max_hold = w["max_hold_seconds"]
+            avg_hold = w["avg_hold_seconds"]
+            print(f"  {w['window_idx']:<4} {window_seconds/86400.0:>6.1f} "
+                  f"{format_duration(timedelta(seconds=min_idle)):>10} "
+                  f"{format_duration(timedelta(seconds=max_idle)):>10} "
+                  f"{format_duration(timedelta(seconds=avg_idle)):>10} "
+                  f"{format_duration(timedelta(seconds=min_hold)):>10} "
+                  f"{format_duration(timedelta(seconds=max_hold)):>10} "
+                  f"{format_duration(timedelta(seconds=avg_hold)):>10} "
+                  f"{w['win_rate']*100:>7.1f}%")
+        print()
 
     # Metrics table
     print(f"  {'Win':<4} {'Profit':>10} {'EP':>8} {'PF':>6} {'RF':>6} "
