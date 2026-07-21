@@ -60,10 +60,10 @@ Field-by-field (also documented in the MQL5 docs page above):
 | `time` | `datetime` | 8 | Unix seconds (UTC epoch). Stored as the broker-server local timestamp; do NOT assume UTC. |
 | `period` | `datetime` | 8 | Start of the reporting period the indicator describes (e.g. `2024-01-01 00:00:00` for a January release). |
 | `revision` | `int` | 4 | 0 = first release, 1+ = revisions. |
-| `actual_value` | `long` | 8 | Published value × 10^6. `LONG_MIN` (-9223372036854775808) if not set. Divide by 1,000,000 to recover the human value. |
-| `prev_value` | `long` | 8 | Previous period value × 10^6 or `LONG_MIN`. |
-| `revised_prev_value` | `long` | 8 | Revised previous period value × 10^6 or `LONG_MIN`. |
-| `forecast_value` | `long` | 8 | Forecast value × 10^6 or `LONG_MIN`. |
+| `actual_value` | `long` × 10⁻⁶ → `float64` | 8 | Published value × 10^6 in the binary; converted to `float` × 10⁻⁶ in the DataFrame. `LONG_MIN` (-9223372036854775808) marks "not set" and is decoded as `NaN`. |
+| `prev_value` | `long` × 10⁻⁶ → `float64` | 8 | Previous period value × 10⁻⁶ or `NaN`. |
+| `revised_prev_value` | `long` × 10⁻⁶ → `float64` | 8 | Revised previous period value × 10⁻⁶ or `NaN`. |
+| `forecast_value` | `long` × 10⁻⁶ → `float64` | 8 | Forecast value × 10⁻⁶ or `NaN`. |
 | `impact_type` | `ENUM_CALENDAR_EVENT_IMPACT` | 4 (int) | 0 = `CALENDAR_IMPACT_NA`, 1 = `CALENDAR_IMPACT_POSITIVE`, 2 = `CALENDAR_IMPACT_NEGATIVE`. Records the **actual** market reaction, NOT the pre-announced `importance` filter. |
 
 Total struct size per MQL5 docs: **80 bytes**.
@@ -176,14 +176,28 @@ The MQL5 documentation explicitly states:
 > (-9223372036854775808).
 
 This applies to `actual_value`, `prev_value`, `revised_prev_value`,
-and `forecast_value`. Always test `value != LONG_MIN` before dividing
-by 1,000,000 — Python does not have the same overflow concerns as C,
-but the convention must still be honored or you will see
-`-9_223_372_036.854775808` floating-point noise.
+and `forecast_value`. In the on-disk binary these fields are scaled
+`× 10^6`, so the unset sentinel is the same `LONG_MIN` value
+regardless of any actual economic magnitude.
+
+`parse_mql_calendar_bin.py` decodes this for you:
+
+- The four `*value` columns are exposed as **`float64`** (not `int64`)
+  so the unset state can be represented.
+- `LONG_MIN` → `NaN` (`float('nan')`)
+- everything else → the raw value × `10^-6`
+
+So `200000` in the binary becomes `0.2` in the DataFrame, and
+`LONG_MIN` becomes `NaN`. Check for unset via `pd.isna(df['actual_value'])`
+or `df['actual_value'].notna()`. **Never** divide an `int64` column
+in place — the sentinel would become a meaningless float before you
+get the chance to mask it.
 
 The MQL5 source provides convenience methods that hide this:
 `HasActualValue()`, `GetActualValue()` (returns `NaN` if unset), etc.
-The on-disk binary does not — you must check the raw field yourself.
+The on-disk binary does not — `parse_mql_calendar_bin.py` performs
+the same conversion so Python code reads the field the same way the
+MQL5 docs describe.
 
 ---
 

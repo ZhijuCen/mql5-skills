@@ -135,6 +135,14 @@ def read_calendar_bin(path: str | os.PathLike) -> pd.DataFrame:
     # Convert Unix seconds → pandas Timestamps (tz-naive — see docstring).
     df["time"] = pd.to_datetime(df["time"], unit="s", utc=False)
     df["period"] = pd.to_datetime(df["period"], unit="s", utc=False)
+    # The four `*value` fields are MQL5 `long` × 10^6 — see module
+    # docstring §5. LONG_MIN marks "not set"; everything else is a
+    # real value that needs the ×10^-6 un-scale to be human-readable.
+    # pandas does not have an int NaN, so the float dtype with NaN is
+    # the honest representation of the unset / set dichotomy.
+    for col in ("actual_value", "prev_value", "revised_prev_value",
+                "forecast_value"):
+        df[col] = df[col].where(df[col] != LONG_MIN).astype("float64") / 1e6
     return df
 
 
@@ -215,10 +223,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"time range:           {df['time'].min()}  →  {df['time'].max()}")
     print(f"unique event_id:      {df['event_id'].nunique()}")
     print(f"impact_type counts:   "
-          f"NA={int((df['impact_type'] == 0).sum())}, "
-          f"positive={int((df['impact_type'] == 1).sum())}, "
-          f"negative={int((df['impact_type'] == 2).sum())}")
-    n_set = int((df["actual_value"] != LONG_MIN).sum())
+          f"NA={int((df['impact_type'] == 0).sum().item())}, "
+          f"positive={int((df['impact_type'] == 1).sum().item())}, "
+          f"negative={int((df['impact_type'] == 2).sum().item())}")
+    n_set = int(df["actual_value"].notna().sum().item())
     print(f"actual_value set:     {n_set} / {len(df)}")
     print()
 
