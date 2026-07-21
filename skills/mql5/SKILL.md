@@ -5,14 +5,13 @@ description: >
   and Services. Focus on positions, orders, indicators, ticks, bars, risk
   management, backtesting, and multi-instance MT5 operations. Includes
   programming book and API reference documentation.
-version: "0.1"
 license: MIT
 compatibility: >
   Target: MetaTrader 5 platform. Language: MQL5 (C++-like syntax).
   File extensions: *.mq5 (source), *.mqh (headers).
   Run time: Windows native, Linux via Wine, macOS via Wine.
 metadata:
-  project-version: "0.1.0"
+  version: "0.1"
   focus-areas:
     - positions
     - orders
