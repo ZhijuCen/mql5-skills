@@ -601,17 +601,45 @@ double OnTester() {
 
 ### Parameter Optimization
 
-When running optimization in the GUI, define parameter ranges as
-`[start, stop, step]` (stop inclusive). For example:
+When running optimization via an `.ini` config (the deterministic,
+reproducible path), the `[TesterInputs]` section uses
+`value||start||step||stop||Y` per line. The fifth token is the
+optimization gate:
 
-| Parameter | Start | Stop | Step |
-|-----------|-------|------|------|
-| RiskPercent | 0.5 | 3.0 | 0.5 |
-| Slippage | 5 | 20 | 5 |
-| MagicNumber | 10000 | 10010 | 1 |
+- `value` — the current value the EA starts from (the field MT5 will
+  use if you re-run with `Optimization=0`)
+- `start`, `step`, `stop` — the parameter range and granularity
+- `Y` / `N` — `Y` enables the parameter for optimization, `N` keeps
+  it fixed at `value`
 
-In MT5 Strategy Tester: set each `input` parameter to "Enable optimization",
-then configure range/step in the optimization tab.
+Example — from `resources/Anonymous.XAUUSD.M15.ini`:
+
+| Input                   | value      | start  | step   | stop   | Optimize |
+|-------------------------|------------|--------|--------|--------|----------|
+| `InpRiskPercent`        | `2`        | `1.0`  | `1`    | `2.0`  | `N`      |
+| `InpSLPips`             | `40`       | `16`   | `4`    | `32`   | `Y`      |
+| `InpTPPips`             | `150`      | `100`  | `100`  | `200`  | `Y`      |
+| `InpSwingCandles`       | `100`      | `50`   | `50`   | `100`  | `N`      |
+| `InpSwingWickSizeThreshold` | `0.0`      | `0`    | `0.3333`| `1`   | `Y`      |
+| `InpUseBreakEven`       | `true`     | `false`| `0`    | `true` | `N`      |
+
+Notes on the format:
+
+- The pipe-separated layout is exactly what MT5 reads back into the
+  Inputs grid when you `Open` the `.ini` in the Strategy Tester. Field
+  order is **fixed** — moving `step` before `start`, or omitting the
+  trailing `Y/N`, silently disables the parameter.
+- `step` for boolean / enum parameters is conventionally `0` (the
+  only two values are `start` and `stop`).
+- Parameters with `Y` still need a sensible `start` / `step` / `stop`
+  range — leaving `step` at `0` is how the GUI encodes "single value"
+  but with `Y` it will only run one pass per parameter.
+- `value` should always match what you'd want in a non-optimized
+  single test — that is the "current" reference point.
+
+In the MT5 GUI: set each `input` parameter to "Enable optimization",
+then configure range/step in the optimization tab. The `.ini` form is
+preferred for reproducible runs and for git-tracked configurations.
 
 ### Backtesting Workflow
 
