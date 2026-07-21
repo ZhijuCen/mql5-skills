@@ -1,0 +1,114 @@
+16:48:22.527	EURUSD,M5: testing of Experts\ImportCalendarValidation-EA.ex5 from 2026.01.01 00:00 to 2026.03.07 00:00 started with inputs:
+16:48:22.527	  InpCurrencies=USD,EUR
+16:48:22.527	  InpDateFrom=1735689600
+16:48:22.527	  InpDateTo=1767225600
+16:48:22.527	  InpEventCodes=
+16:48:22.527	  InpMinImportance=3
+16:48:22.546   🔄 Initializing news module:
+16:48:22.546   ✅ Events from Resource Loaded: 455 events for: USD
+16:48:22.546   ✅ Event #0
+16:48:22.546   ID:              230215
+16:48:22.546   Event ID:      840140001
+16:48:22.546   Time:            2025.01.02 16:30:00
+16:48:22.546   Impact:          CALENDAR_IMPACT_POSITIVE
+16:48:22.546   Revision:         0
+16:48:22.546   Actual:           211.0
+16:48:22.546   Revised:          220.0
+16:48:22.546   Forecast:         219.0
+16:48:22.546   Previous:         219.0
+16:48:22.546   ✅ Event #1
+16:48:22.546   ID:              230641
+16:48:22.546   Event ID:        840500001
+16:48:22.546   Time:             2025.01.02 17:45:00
+16:48:22.546   Impact:           CALENDAR_IMPACT_NEGATIVE
+16:48:22.546   Revision:         3
+16:48:22.546   Actual:           49.4
+16:48:22.546   Forecast:         50.5
+16:48:22.546   Previous:         49.7
+16:48:22.546   ✅ Event #2
+16:48:22.546   ID:              224051
+16:48:22.546   Event ID:        840200001
+16:48:22.546   Time:             2025.01.02 19:00:00
+16:48:22.546   Impact:           CALENDAR_IMPACT_NEGATIVE
+16:48:22.546   Revision:         0
+16:48:22.546   Actual:           -1.178
+16:48:22.546   Forecast:         -1.682
+16:48:22.546   Previous:         -4.237
+
+16:48:22.553   ✅ Event #453
+16:48:22.553   ID:              274419
+16:48:22.553   Event ID:        840510001
+16:48:22.553   Time:             2025.12.30 17:45:00
+16:48:22.553   Impact:           CALENDAR_IMPACT_POSITIVE
+16:48:22.553   Revision:         0
+16:48:22.553   Actual:           43.5
+16:48:22.553   Forecast:         42.4
+16:48:22.553   Previous:         36.3
+16:48:22.553   ✅ Event #454
+16:48:22.553   ID:              274484
+16:48:22.553   Event ID:        840140001
+16:48:22.553   Time:             2025.12.31 16:30:00
+16:48:22.553   Impact:           CALENDAR_IMPACT_POSITIVE
+16:48:22.553   Revision:         0
+16:48:22.553   Actual:           199.0
+16:48:22.553   Revised:          215.0
+16:48:22.553   Forecast:         227.0
+16:48:22.553   Previous:         214.0
+
+16:48:22.553   ✅ Events from Resource Loaded: 60 events for: EUR
+16:48:22.553   ✅ Event #0
+16:48:22.553   ID:              231322
+16:48:22.553   Event ID:        999030013
+16:48:22.553   Time:             2025.01.07 13:00:00
+16:48:22.553   Impact:           CALENDAR_IMPACT_NA
+16:48:22.553   Revision:         1
+16:48:22.553   Actual:           2.4
+16:48:22.553   Forecast:         2.4
+16:48:22.553   Previous:         2.2
+16:48:22.553   ✅ Event #1
+16:48:22.553   ID:              187384
+16:48:22.553   Event ID:        999040007
+16:48:22.553   Time:             2025.01.08 13:00:00
+16:48:22.553   Impact:           CALENDAR_IMPACT_POSITIVE
+16:48:22.553   Revision:         0
+16:48:22.553   Actual:           21.0
+16:48:22.553   Revised:          17.8
+16:48:22.553   Forecast:         15.7
+16:48:22.553   Previous:         17.7
+16:48:22.553   ✅ Event #2
+16:48:22.553   ID:              233201
+16:48:22.553   Event ID:        999030013
+16:48:22.553   Time:             2025.01.17 13:00:00
+16:48:22.553   Impact:           CALENDAR_IMPACT_NA
+16:48:22.553   Revision:         3
+16:48:22.553   Actual:           2.4
+16:48:22.553   Forecast:         2.4
+16:48:22.553   Previous:         2.4
+
+16:48:22.555   ✅ Event #57
+16:48:22.555   ID:              275861
+16:48:22.555   Event ID:        999030013
+16:48:22.555   Time:             2025.12.17 13:00:00
+16:48:22.555   Impact:           CALENDAR_IMPACT_NEGATIVE
+16:48:22.555   Revision:         3
+16:48:22.555   Actual:           2.1
+16:48:22.555   Forecast:         2.2
+16:48:22.555   Previous:         2.2
+16:48:22.555   ✅ Event #58
+16:48:22.555   ID:              204746
+16:48:22.555   Event ID:        999010006
+16:48:22.555   Time:             2025.12.18 16:15:00
+16:48:22.555   Impact:           CALENDAR_IMPACT_NA
+16:48:22.555   Revision:         0
+16:48:22.555   Actual:           2.0
+16:48:22.555   Previous:         2.0
+16:48:22.555   ✅ Event #59
+16:48:22.555   ID:              204762
+16:48:22.555   Event ID:        999010007
+16:48:22.555   Time:             2025.12.18 16:15:00
+16:48:22.555   Impact:           CALENDAR_IMPACT_NA
+16:48:22.555   Revision:         0
+16:48:22.555   Actual:           2.15
+16:48:22.555   Previous:         2.15
+16:48:22.555   ⚠️ Mode: TESTER (data from resource)
+16:48:22.700	test Experts\ImportCalendarValidation-EA.ex5 on EURUSD,M5 thread finished
