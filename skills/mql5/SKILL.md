@@ -557,6 +557,7 @@ The four parsing scripts and their sub-commands:
 |--------|--------------|
 | `scripts/parse_tester_report.py` | `report`, `analyze`, `windows` |
 | `scripts/parse_optimizer_report.py` | `report`, `analyze`, `outliers`, `failures` |
+| `scripts/parse_mql_calendar_bin.py` | (positional PATH) `[--head N] [--tail N] [--nfp-id ID]` |
 | `scripts/verify_sl_tp_formulas.py` | `verify [SYMBOL ...]` |
 | `scripts/mql5_helper.py` | `compile`, `check`, `deploy`, `status`, `list` |
 
@@ -1243,6 +1244,50 @@ Parameter: InpRiskPercent (5 distinct values in failure set)
   then `outliers` to inspect specific passes inside the surviving
   parameter region.
 
+### News-Aware Backtesting — MQL5 Economic Calendar as a Binary Resource
+
+The MetaTrader 5 strategy tester has **no internet access**, so calling
+`CalendarValueHistory()` inside an EA returns an empty array and an
+error. The pattern from MQL5 article 22196
+(<https://www.mql5.com/en/articles/22196>) is to:
+
+1. **Export once on a live terminal** — run
+   `ExportCalendarForTester-S.mq5` (in
+   `resources/artical-22196-MetaQuotes/22196-attaches/`) which calls
+   `FileWriteArray()` to dump a filtered `MqlCalendarValue[]` to disk
+   (e.g. `USD_calendar_test_res.bin`, 128 bytes per record).
+2. **Embed as a `#resource` array in the EA** — one pragma in the EA:
+   ```
+   #resource "\\Files\\USD_calendar_test_res.bin" as MqlCalendarValue USD_res_calendar_data[]
+   ```
+   MetaTrader reads the file at compile time and rehydrates it as a
+   typed array at runtime. The tester reads from RAM.
+3. **Branch on tester vs live at `OnInit()`** —
+   `MQLInfoInteger(MQL_TESTER)` picks the resource path; otherwise
+   call `CalendarValueHistory()`. See
+   `ImportCalendarValidation-EA.mq5` for the full pattern.
+
+The repository ships two such sample files under
+`resources/artical-22196-MetaQuotes/outputs/`:
+
+- `USD_calendar_test_res.bin` — 8,888 records (USD, high-importance,
+  NFP-filtered)
+- `USD_calendar_test_res-latest.bin` — 9,188 records (5 additional
+  FOMC-related event_ids)
+
+Inspect / analyze these from outside MetaTrader via
+`scripts/parse_mql_calendar_bin.py` (pandas-based; prints head/tail
+plus all release timestamps for the `--nfp-id`, default
+`840030016` = Nonfarm Payrolls). The on-disk binary layout is
+documented in `references/quick-ref-mql5-economic-calendar.md`.
+
+Two important caveats when interpreting parsed timestamps:
+
+- `time` is stored as **broker-server local Unix seconds**, not UTC.
+  Apply `.dt.tz_localize(...)` yourself if you need a specific zone.
+- `LONG_MIN` (`-9223372036854775808`) marks unset value fields. Always
+  test before dividing by 1,000,000 to recover the human value.
+
 ## 7. Event Handlers Reference
 
 | Handler | When Called | Use Case |
@@ -1474,6 +1519,11 @@ double OnTester() {
 - `references/symbol-spec/` — Symbol specification CSVs (broker-specific)
   - `specs-XAUUSD.csv` — XAUUSD: CFD Leverage, ContractSize=100, Digits=2
   - `specs-USDJPY.csv` — USDJPY: Forex, ContractSize=100000, Digits=3
+- `references/quick-ref-mql5-economic-calendar.md` — `MqlCalendarValue`
+  binary file format (128 bytes/record), the article 22196 export /
+  `#resource` import pattern, `LONG_MIN` / `event_id` / `impact_type`
+  conventions. See `scripts/parse_mql_calendar_bin.py` for the offline
+  reader.
 - `scripts/verify_sl_tp_formulas.py` — Python verification of SL/TP risk formulas (CLI: `verify_sl_tp_formulas.py verify [SYMBOL ...] [-o OUTPUT_FILE]`)
 
 ### External
