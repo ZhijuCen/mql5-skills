@@ -252,8 +252,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         # Print one per line; the script does NOT shift timezones —
         # these are the broker-server local timestamps as written.
-        for t in nfp:
-            print(t)
+        # Trim the long history dump to first 3 + last 12 so the
+        # output stays scannable when NFP has 200+ releases.
+        N_HEAD = 3
+        N_TAIL = 12
+        if len(nfp) > N_HEAD + N_TAIL:
+            for t in nfp.iloc[:N_HEAD]:
+                print(t)
+            omitted = len(nfp) - N_HEAD - N_TAIL
+            print(f"  ... ({omitted} releases omitted) ...")
+            for t in nfp.iloc[-N_TAIL:]:
+                print(t)
+        else:
+            for t in nfp:
+                print(t)
     return 0
 
 
