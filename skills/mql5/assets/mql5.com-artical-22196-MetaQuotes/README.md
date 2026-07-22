@@ -209,6 +209,5 @@ the saved HTML at the top of this directory (read it with
 because it is 250 KB of page chrome plus the body).
 
 The schema reference lives at
-`../../skills/mql5/references/quick-ref-mql5-economic-calendar.md`
-and the offline reader at
-`../../skills/mql5/scripts/parse_mql_calendar_bin.py`.
+`../../references/quick-ref-mql5-economic-calendar.md` and the offline
+reader at `../../scripts/parse_mql_calendar_bin.py`.

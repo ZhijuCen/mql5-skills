@@ -612,7 +612,7 @@ optimization gate:
 - `Y` / `N` — `Y` enables the parameter for optimization, `N` keeps
   it fixed at `value`
 
-Example — from `resources/Anonymous.XAUUSD.M15.ini`:
+Example — from `assets/Anonymous.XAUUSD.M15.ini`:
 
 | Input                   | value      | start  | step   | stop   | Optimize |
 |-------------------------|------------|--------|--------|--------|----------|
@@ -1281,9 +1281,9 @@ error. The pattern from MQL5 article 22196
 
 1. **Export once on a live terminal** — run
    `ExportCalendarForTester-S.mq5` (in
-   `resources/artical-22196-MetaQuotes/22196-attaches/`) which calls
-   `FileWriteArray()` to dump a filtered `MqlCalendarValue[]` to disk
-   (e.g. `USD_calendar_test_res.bin`, 128 bytes per record).
+   `assets/mql5.com-artical-22196-MetaQuotes/22196-attaches/`) which
+   calls `FileWriteArray()` to dump a filtered `MqlCalendarValue[]` to
+   disk (e.g. `USD_calendar_test_res.bin`, 128 bytes per record).
 2. **Embed as a `#resource` array in the EA** — one pragma in the EA:
    ```
    #resource "\\Files\\USD_calendar_test_res.bin" as MqlCalendarValue USD_res_calendar_data[]
@@ -1295,19 +1295,27 @@ error. The pattern from MQL5 article 22196
    call `CalendarValueHistory()`. See
    `ImportCalendarValidation-EA.mq5` for the full pattern.
 
-The repository ships two such sample files under
-`resources/artical-22196-MetaQuotes/outputs/`:
+The full source set for article 22196 (the original article HTML, the
+six `.mq5`/`.txt` files in `22196-attaches/`) ships under
+`assets/mql5.com-artical-22196-MetaQuotes/`. See that directory's
+`README.md` for the full inventory and thesis. The
+`outputs/USD_calendar_test_res*.bin` file is **not** checked into git
+(local `.gitignore` excludes the `outputs/` directory — see
+`README.md`'s file inventory) — generate one on a live terminal by
+running `ExportCalendarForTester-S.mq5`, then point the parser at it.
 
-- `USD_calendar_test_res.bin` — 8,888 records (USD, high-importance,
-  NFP-filtered)
-- `USD_calendar_test_res-latest.bin` — 9,188 records (5 additional
-  FOMC-related event_ids)
+`#resource` bakes the data into the `.ex5` at compile time, so after
+replacing the `.bin` you must recompile the EA (F7) for the change to
+take effect.
 
-Inspect / analyze these from outside MetaTrader via
-`scripts/parse_mql_calendar_bin.py` (pandas-based; prints head/tail
-plus all release timestamps for the `--nfp-id`, default
-`840030016` = Nonfarm Payrolls). The on-disk binary layout is
-documented in `references/quick-ref-mql5-economic-calendar.md`.
+Inspect / analyze a `.bin` from outside MetaTrader via
+`scripts/parse_mql_calendar_bin.py PATH` (pandas-based; prints
+head/tail plus all release timestamps for the `--nfp-id`, default
+`840030016` = Nonfarm Payrolls). The `.bin` itself is gitignored —
+generate it with
+`assets/mql5.com-artical-22196-MetaQuotes/22196-attaches/ExportCalendarForTester-S.mq5`
+on a live terminal. The on-disk binary layout is documented in
+`references/quick-ref-mql5-economic-calendar.md`.
 
 Two important caveats when interpreting parsed timestamps:
 

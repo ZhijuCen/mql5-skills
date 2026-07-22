@@ -58,8 +58,8 @@ Usage:
                                                   [--nfp-id 840030016]
 
     PATH            path to the .bin file (the script picks the most
-                    recent USD_calendar_test_res*.bin from the project's
-                    resources/ directory when omitted).
+                    recent USD_calendar_test_res*.bin from
+                    skills/mql5/assets/.../outputs/ when omitted).
     --head N        print the first N rows of the DataFrame.
     --tail N        print the last N rows.
     --nfp-id ID     event_id of "the main release" (default 840030016
@@ -147,13 +147,13 @@ def read_calendar_bin(path: str | os.PathLike) -> pd.DataFrame:
 
 
 def default_path() -> str | None:
-    """Pick the most recent USD_calendar_test_res*.bin under resources/.
+    """Pick the most recent USD_calendar_test_res*.bin shipped with the skill.
 
-    The repository ships outputs at
-        resources/artical-22196-MetaQuotes/outputs/USD_calendar_test_res*.bin
+    The skill ships one such file at
+        skills/mql5/assets/mql5.com-artical-22196-MetaQuotes/outputs/USD_calendar_test_res*.bin
     """
     candidates = glob.glob(
-        "resources/artical-22196-MetaQuotes/outputs/USD_calendar_test_res*.bin"
+        "skills/mql5/assets/mql5.com-artical-22196-MetaQuotes/outputs/USD_calendar_test_res*.bin"
     )
     if not candidates:
         return None
@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "Path to the .bin file. If omitted, picks the most recent "
-            "USD_calendar_test_res*.bin under resources/."
+            "USD_calendar_test_res*.bin shipped under skills/mql5/assets/."
         ),
     )
     p.add_argument(
@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "event_id of the main NFP release to list timestamps for "
             "(default 840030016 = Nonfarm Payrolls per "
-            "resources/calendar-events.csv)."
+            "skills/mql5/assets/calendar-events.csv)."
         ),
     )
     args = p.parse_args(argv)
@@ -206,7 +206,9 @@ def main(argv: list[str] | None = None) -> int:
     if not path:
         print(
             "error: no .bin file specified and none found under "
-            "resources/artical-22196-MetaQuotes/outputs/",
+            "skills/mql5/assets/mql5.com-artical-22196-MetaQuotes/outputs/ "
+            "(the directory is gitignored — generate a .bin on a live terminal "
+            "via 22196-attaches/ExportCalendarForTester-S.mq5).",
             file=sys.stderr,
         )
         return 2
