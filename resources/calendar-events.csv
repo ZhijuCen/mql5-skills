@@ -1,7 +1,7 @@
-event_id,title,currency
-840010007,GDP q/q,USD
-840020001,Trade Balance,USD
-840030007,CPI y/y,USD
-840030015,Unemployment Rate,USD
-840030016,Nonfarm Payrolls,USD
-840050014,Fed Interest Rate Decision,USD
+event_id,event_code,name,currency
+840010007,gross-domestic-product-qq,GDP q/q,USD
+840020001,trade-balance,Trade Balance,USD
+840030007,consumer-price-index-yy,CPI y/y,USD
+840030015,unemployment-rate,Unemployment Rate,USD
+840030016,nonfarm-payrolls,Nonfarm Payrolls,USD
+840050014,fed-interest-rate-decision,Fed Interest Rate Decision,USD
