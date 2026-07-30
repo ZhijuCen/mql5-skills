@@ -1277,45 +1277,68 @@ Parameter: InpRiskPercent (5 distinct values in failure set)
 The MetaTrader 5 strategy tester has **no internet access**, so calling
 `CalendarValueHistory()` inside an EA returns an empty array and an
 error. The pattern from MQL5 article 22196
-(<https://www.mql5.com/en/articles/22196>) is to:
+(<https://www.mql5.com/en/articles/22196>) is to export calendar data
+on a live terminal and embed it as `#resource` arrays in the EA.
 
-1. **Export once on a live terminal** — run
-   `ExportCalendarForTester-S.mq5` (in
-   `assets/mql5.com-artical-22196-MetaQuotes/22196-attaches/`) which
-   calls `FileWriteArray()` to dump a filtered `MqlCalendarValue[]` to
-   disk (e.g. `USD_calendar_test_res.bin`, 128 bytes per record).
-2. **Embed as a `#resource` array in the EA** — one pragma in the EA:
-   ```
-   #resource "\\Files\\USD_calendar_test_res.bin" as MqlCalendarValue USD_res_calendar_data[]
-   ```
-   MetaTrader reads the file at compile time and rehydrates it as a
-   typed array at runtime. The tester reads from RAM.
-3. **Branch on tester vs live at `OnInit()`** —
-   `MQLInfoInteger(MQL_TESTER)` picks the resource path; otherwise
-   call `CalendarValueHistory()`. See
-   `ImportCalendarValidation-EA.mq5` for the full pattern.
+**Step 1: Export on a live terminal**
 
-The full source set for article 22196 (the original article HTML, the
-six `.mq5`/`.txt` files in `22196-attaches/`) ships under
+Run `ExportCalendarForTester-S.mq5` (in
+`assets/mql5.com-artical-22196-MetaQuotes/22196-attaches/`). This
+script exports a **dual-bin** output per currency:
+
+- `{CCY}_calendar_test_res.bin` — `MqlCalendarValue[]` (128 bytes/record)
+- `{CCY}_calendar_events_test_res.bin` — `CalendarEventMeta[]` (156 bytes/record)
+
+Key inputs (configurable in the script's input dialog):
+
+| Input | Purpose | Default |
+|-------|---------|---------|
+| `InpCurrencies` | Comma-separated ISO codes (e.g. `"USD,EUR,CNY"`) | `"USD"` |
+| `InpDateFrom` / `InpDateTo` | Time range (broker clock) | `0` / `2026.08.01` |
+| `InpEventCodes` | Comma-separated event code filter (substring match) | `""` (all) |
+| `InpEventIDs` | Comma-separated ulong event ID filter | `""` (all) |
+| `InpMinImportance` | Floor: `NONE`/`LOW`/`MED`/`HIGH` | `NONE` (export all) |
+| `InpUseCommonDir` | Write to `Terminal/Common/Files` vs `MQL5/Files` | `false` |
+
+The events bin is needed because `MqlCalendarEvent` contains `string`
+fields (`name`, `event_code`) that cannot be serialized via
+`FileWriteArray`. The script resolves each unique `event_id` to a
+custom POD struct (`CalendarEventMeta`) with fixed `char[64]` buffers
+and writes it separately.
+
+**Step 2: Embed as `#resource` arrays in the EA**
+
+Two pragmas per currency — one for values, one for events:
+```mql5
+#resource "\\Files\\USD_calendar_test_res.bin" as MqlCalendarValue USD_res_calendar_data[]
+#resource "\\Files\\USD_calendar_events_test_res.bin" as CalendarEventMeta USD_events_data[]
+```
+MetaTrader reads each file at compile time and rehydrates it as a
+typed array at runtime. The tester reads from RAM.
+
+**Step 3: Branch on tester vs live at `OnInit()`**
+
+`MQLInfoInteger(MQL_TESTER)` picks the resource path; otherwise call
+`CalendarValueHistory()`. See `ImportCalendarValidation-EA.mq5` for
+the full pattern.
+
+The full source set for article 22196 (the original article HTML and
+the source files in `22196-attaches/`) ships under
 `assets/mql5.com-artical-22196-MetaQuotes/`. See that directory's
-`README.md` for the full inventory and thesis. The
-`outputs/USD_calendar_test_res*.bin` file is **not** checked into git
-(local `.gitignore` excludes the `outputs/` directory — see
-`README.md`'s file inventory) — generate one on a live terminal by
-running `ExportCalendarForTester-S.mq5`, then point the parser at it.
+`README.md` for the full inventory and thesis. The `outputs/` directory
+is **not** checked into git (local `.gitignore` excludes it) — generate
+`.bin` files on a live terminal by running
+`ExportCalendarForTester-S.mq5`, then point the parser at them.
 
 `#resource` bakes the data into the `.ex5` at compile time, so after
-replacing the `.bin` you must recompile the EA (F7) for the change to
+replacing a `.bin` you must recompile the EA (F7) for the change to
 take effect.
 
 Inspect / analyze a `.bin` from outside MetaTrader via
 `scripts/parse_mql_calendar_bin.py PATH` (pandas-based; prints
 head/tail plus all release timestamps for the `--nfp-id`, default
-`840030016` = Nonfarm Payrolls). The `.bin` itself is gitignored —
-generate it with
-`assets/mql5.com-artical-22196-MetaQuotes/22196-attaches/ExportCalendarForTester-S.mq5`
-on a live terminal. The on-disk binary layout is documented in
-`references/quick-ref-mql5-economic-calendar.md`.
+`840030016` = Nonfarm Payrolls). The on-disk binary layout is
+documented in `references/quick-ref-mql5-economic-calendar.md`.
 
 Two important caveats when interpreting parsed timestamps:
 
@@ -1323,6 +1346,114 @@ Two important caveats when interpreting parsed timestamps:
   Apply `.dt.tz_localize(...)` yourself if you need a specific zone.
 - `LONG_MIN` (`-9223372036854775808`) marks unset value fields. Always
   test before dividing by 1,000,000 to recover the human value.
+
+### Calendar #resource Pitfalls (Dual-Bin Pipeline)
+
+When an EA embeds calendar data via `#resource` for tester use,
+several structural pitfalls can silently break the pipeline:
+
+**Build-Order Trap**: `SetResourceData` must NOT gate values through
+`IsWatched()` before `BuildWatched()` populates `m_watched_ids`.
+Split into three steps: `SetEventMeta` (no gate) → `BuildWatched`
+→ `SetValues` (gated). Calling `SetValues` before `BuildWatched`
+produces `values=0 upserted` and SandboxGating hard-stop.
+
+**event_code/name Not Copied**: `MqlCalendarEvent` fields default to
+`""`. After `SetEventMeta` copies numeric fields, explicitly assign
+`event_code` and `name` via a `char[64]` → `string` converter
+(`FixedCharToString`). Must be defined BEFORE the class (MQL5 has
+no forward declarations).
+
+**sizeof Mismatch (error 308)**: Changing `CalendarEventMeta` struct
+layout requires: (1) edit in BOTH EA AND export script, (2) re-run
+export on live terminal, (3) copy new bin, (4) F7 recompile.
+Replacing the bin without recompiling has zero effect — `#resource`
+bakes data into `.ex5` at compile time.
+
+**Dual Struct Drift**: The POD struct declared in the EA and in the
+export script MUST be field-identical. Verify with
+`parse_mql_calendar_bin.py --head 1` on the produced events bin.
+
+**Tester Mode is Hermetic**: Once `#resource`-embedded, the tester
+needs zero runtime files. Error messages saying "ensure .bin in
+MQL5/Files/" are wrong — the actual failure is empty `m_values[]`
+from the build-order trap above. Remote optimization agents never
+have `MQL5/Files/` access.
+
+### Strategy Iteration Workflow
+
+When an EA's strategy component underperforms and needs rollback or
+iteration, follow a structured process:
+
+**Governing Invariant**: Every strategy hypothesis must be compared
+against a reproducible baseline in a separate validation stage. Do not
+combine a rollback, a new signal detector, and new order types in one
+unmeasured change.
+
+**Rollback Checklist** (verify each layer, not just the file you are editing):
+1. **Configuration**: remove settings, modes, parameters, or shadow fields that no longer have runtime consumers
+2. **Lifecycle hooks**: drop setup/teardown routines that only existed to support the removed feature
+3. **Modules**: remove feature-only components and their includes; restore the prior owner of the calculation
+4. **Order entry**: verify direction (buy/sell) and price relation (above/below reference level) match the prior semantics for the chosen order type
+5. **Optimization plumbing**: ordinary inputs should remain optimizable without an internal map, decode table, or compression layer
+6. **Documentation**: add a new decision/plan with reason, scope, consequences, and user test gate
+
+**Verification Pitfalls**:
+- A successful Wine/MetaEditor process exit is NOT sufficient evidence
+  of compilation. Require fresh `.ex5` and compiler log artifacts.
+- A helper that deploys into a different terminal tree can make the
+  source appear unchanged while compiling another copy. Verify the
+  deployed path and artifact timestamps.
+- A residual-name scan must include source, docs, and generated-map
+  references.
+- Do not infer that a rollback is equivalent to `git revert`: later
+  unrelated fixes may be layered on top. Reconstruct the intended
+  prior semantics from the current call graph.
+
+**Hypothesis Isolation**: Only start the next signal experiment after
+the user has confirmed the rollback baseline result. Otherwise
+performance changes cannot be attributed.
+
+### Common Analysis Pitfalls
+
+**Rename-vs-Behavior Trap**: When diffing two skill/script copies,
+the diff can be a real behavior change OR a pure cosmetic refactor
+(variable rename, comment reword). Do NOT package the second as the
+first. If the only differences are identifier renames and comment
+edits, there is no behavior change — confirm with the user before
+"porting".
+
+**Date-Only String Truncation**: When a function stores window
+boundaries as `strftime("%Y.%m.%d")` for display, downstream code
+that re-parses with `strptime` gets 00:00 of the displayed date —
+not the original full-precision datetime. For non-whole-day windows
+(e.g. N=18 of 548 days = 30.44-day windows), the re-parsed length
+drifts by up to ½ day. Fix: store `window_seconds` once and have
+downstream consumers read it instead of re-parsing date strings.
+
+**Window-Clipped vs Raw Trade Duration**:
+- **Window-clipped** = `max(open, t_start)` → `min(close, t_end)`.
+  Used for idle accounting (time in position within the window).
+- **Raw** = `close_time - open_time`. Used for per-trade stats
+  (Min/Max/Avg holding time) that must mirror MT5's HTML report.
+  MT5's "Maximal position holding time" is the trade's full lifetime,
+  NOT window-clipped. Computing MaxHold by window-clipping produces
+  a silent semantic bug at N=1.
+
+**Idle-Gap Decomposition**: For `MinIdle / MaxIdle / AvgIdle`, the
+simple "gap between consecutive trades" formula is WRONG when the EA
+holds multiple simultaneous positions (grid, hedging). Use sweep-line
+merge + complement:
+1. Build window-clipped in-position intervals per trade
+2. Sort by start, merge overlapping into minimal disjoint set
+3. Free intervals = complement within `[0, window_seconds]`
+4. `min/max/avg_idle` = stats of free-interval lengths
+
+**Self-Test Before Inventing Diagnostics**: When a user reports
+"news filter is dead" or "no trades blocked", check pre-existing
+diagnostic recipes first. The empirical signature (e.g. `dt` uniformly
+`±broker_utc_offset × 3600s` on every bar) is a single most specific
+diagnostic — do NOT spend cycles re-deriving it.
 
 ## 7. Event Handlers Reference
 
@@ -1560,6 +1691,12 @@ double OnTester() {
   `#resource` import pattern, `LONG_MIN` / `event_id` / `impact_type`
   conventions. See `scripts/parse_mql_calendar_bin.py` for the offline
   reader.
+- `references/quick-ref-shadow-parameter-optimization.md` — Shadow
+  parameter compression for conditional optimization axes (combo index,
+  range normalization, CSV combo map, CONST/ATR segment pattern).
+  Covers `ParameterGetRange` / `ParameterSetRange` architecture with
+  `OnTesterInit` → `OnInit` decode cycle and report-interpretation
+  pitfalls. Source pattern: MQL5 Book's BandOsMApro example.
 - `scripts/verify_sl_tp_formulas.py` — Python verification of SL/TP risk formulas (CLI: `verify_sl_tp_formulas.py verify [SYMBOL ...] [-o OUTPUT_FILE]`)
 
 ### External
