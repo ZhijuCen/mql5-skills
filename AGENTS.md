@@ -73,6 +73,13 @@ Per agentskills.io spec:
 - Body: Markdown instructions for the agent
 - Optional dirs: `scripts/`, `references/`, `assets/`
 - Focus areas: positions, orders, indicators, ticks, bars
+- Hard limits:
+  - Any `SKILL.md` must not exceed **500 lines**.
+  - MQL5 code templates (EA / Indicator / Script skeletons, OnInit/OnTick
+    boilerplate, indicator handle patterns, etc.) MUST live under
+    `skills/*/assets/templates/` and be referenced from `SKILL.md` by
+    relative path. Do NOT paste full template code into `SKILL.md` body —
+    keep body to instructions and link out to the template file.
 
 ## Scripts
 
@@ -105,12 +112,19 @@ over-fitting / regime change.
 # N=1: validation — should match the full report within tolerance
 python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count 1
 
-# N=4: typical analysis (quarterly for a 1.5y backtest)
-python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count 4
+# N: typical analysis — pick N so each window ≈ 30 natural days
+# (i.e. N ≈ backtest_days // 30); if that yields N < 6, pick N so
+# each window ≈ 14 natural days instead (i.e. N ≈ backtest_days // 14).
+python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count $N
 
 # JSON output for further processing
-python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count 6 --json
+python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count $N --json
 ```
+
+**Picking N (per 2026-07 over-fitting rule):**
+1. Start with **≈ 30 natural days per window** → `N ≈ backtest_days // 30`.
+2. If that gives `N < 6`, switch to **≈ 14 natural days per window**
+   → `N ≈ backtest_days // 14`.
 
 **Conventions:**
 - Time boundaries are equal-length `[t_start, t_end)` slices,

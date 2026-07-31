@@ -1757,8 +1757,10 @@ Examples:
   # N=1: validate that calculation matches the full report
   %(prog)s windows INPUT_FILE --count 1
 
-  # N=4: quarterly analysis for a 1.5y backtest
-  %(prog)s windows INPUT_FILE --count 4
+  # N: typical analysis — pick N so each window is ~30 natural days
+  # (N ~ backtest_days // 30); if that yields N < 6, pick N so each
+  # window is ~14 natural days instead (N ~ backtest_days // 14).
+  %(prog)s windows INPUT_FILE --count $N
 
   # N=8: finer granularity
   %(prog)s windows INPUT_FILE --count 8
