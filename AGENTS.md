@@ -302,7 +302,14 @@ python skills/mql5/scripts/mql5_helper.py status
 python skills/mql5/scripts/mql5_helper.py list
 ```
 
-MT5 paths resolved in order: `$MQL5_DIR` env → cwd walk-up → Program Files scan → Wine fallback.
+Paths are **never auto-detected**. `MT5_BASE`, `MQL5_DIR`, and
+`WINE_DISK_ROOT` must come from the environment or the project-root
+`.env` (walk-up from cwd). `WINE_DISK_ROOT` (e.g. `Z`) is the drive
+letter that maps to `/` under Wine on Unix (Linux/macOS); ignored on
+Windows. Wine paths are written `Z://home/USER/...` (drive letter +
+double forward slash). `compile`/`check` run MetaEditor directly on
+the source file path (no deploy) — `.ex5`/`.log` land next to the
+source; `deploy` copies into the MQL5 tree.
 
 ## Extraction Workflow
 

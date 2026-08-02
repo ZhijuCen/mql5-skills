@@ -4,6 +4,12 @@ MQL5 development helper: compile, check, deploy, list, status.
 
 Supports Windows 10+ natively (PowerShell) and Linux/Wine.
 
+Paths are NEVER auto-detected.  MT5_BASE / MQL5_DIR / WINE_DISK_ROOT
+must come from the environment or the project-root ``.env`` file
+(walk-up from cwd, e.g. ``$PROJECT_ROOT/.env``).  WINE_DISK_ROOT is
+required on Unix (Linux/macOS) only — the drive letter that maps to
+``/`` under Wine (e.g. ``Z``); it is ignored on Windows.
+
 Usage:
     python skills/mql5/scripts/mql5_helper.py compile FILE.mq5
     python skills/mql5/scripts/mql5_helper.py check FILE.mq5
@@ -25,16 +31,6 @@ from typing import Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-# MetaEditor/terminal executables with priority scores (higher=better)
-_MT5_MARKERS: tuple[tuple[str, int], ...] = (
-    ("MetaEditor64.exe", 2),  # needed for compile
-    ("metaeditor64.exe", 1),
-    ("terminal64.exe", 0),
-    ("terminal.exe", 0),
-)
-
-_MQL5_MARKERS = ("Experts", "Indicators", "Scripts")
-
 TYPE_DIRS: dict[str, str] = {
     "expert": "Experts",
     "indicator": "Indicators",
@@ -45,28 +41,35 @@ TYPE_DIRS: dict[str, str] = {
 
 IS_WINDOWS = sys.platform == "win32"
 
-def _load_env(env_path: Optional[Path] = None) -> None:
-    """Load MT5_BASE / MQL5_DIR from a .env file.
+# Variables loaded from the environment / project-root .env.
+# WINE_DISK_ROOT is required on Unix only (Windows ignores it).
+_ENV_KEYS = ("MT5_BASE", "MQL5_DIR", "WINE_DISK_ROOT")
 
-    *env_path* — optional explicit path.  When given, that file must
-    exist (raises ``SystemExit(1)`` on missing).  When ``None`` (the
-    default), walks up from ``Path.cwd()`` and uses the first
-    ``.hermes/.env`` it finds (silent on miss — pre-existing behaviour).
+
+def _load_env(env_path: Optional[Path] = None) -> None:
+    """Load MT5_BASE / MQL5_DIR / WINE_DISK_ROOT from a ``.env`` file.
+
+    *env_path* — optional explicit path (``--env-file``).  When given,
+    that file must exist (raises ``SystemExit(1)`` on missing or
+    unreadable).  When ``None`` (default), walks up from ``Path.cwd()``
+    and uses the first ``.env`` it finds (silent on miss — values may
+    still come from the real environment).
 
     Supports ``KEY="VALUE" KEY2="VALUE2"`` on one line (space-separated),
     one-var-per-line, or mixes thereof, using ``shlex.split`` for quoting.
+    Existing environment variables take precedence via ``setdefault``.
     """
+    candidates: list[Path] = []
     if env_path is not None:
         env_path = Path(env_path)
         if not env_path.is_file():
             print(f"Error: --env-file not found: {env_path}")
             sys.exit(1)
-        candidates: list[Path] = [env_path]
+        candidates.append(env_path)
     else:
-        candidates = []
         d = Path.cwd()
         while True:
-            ef = d / ".hermes" / ".env"
+            ef = d / ".env"
             if ef.is_file():
                 candidates.append(ef)
                 break
@@ -89,102 +92,39 @@ def _load_env(env_path: Optional[Path] = None) -> None:
             idx = token.index("=")
             key = token[:idx]
             val = token[idx + 1 :]
-            if key in ("MT5_BASE", "MQL5_DIR"):
+            if key in _ENV_KEYS:
                 os.environ.setdefault(key, val)
 
 
 # ---------------------------------------------------------------------------
-# Path resolution  ($MT5_BASE / $MQL5_DIR → cwd walk-up → Program Files →
-#                    Wine fallback)
+# Path resolution  — STRICTLY from env / .env.  No directory guessing.
 # ---------------------------------------------------------------------------
 
 
-def _find_mt5_in_program_files() -> Optional[Path]:
-    """Scan Program Files directories for a MetaTrader 5 installation.
-
-    On Windows scans native ``C:\\Program Files`` and
-    ``C:\\Program Files (x86)``.  On Linux/Wine scans under ``/`` and
-    ``~`` equivalents.
-    """
-    candidates: list[Path] = []
-    if IS_WINDOWS:
-        candidates = [
-            Path("C:/Program Files"),
-            Path("C:/Program Files (x86)"),
-        ]
-    else:
-        for root in (Path("/"), Path.home()):
-            for name in ("Program Files", "Program Files (x86)"):
-                candidates.append(root / name)
-
-    found: list[tuple[int, Path]] = []
-    for pf in candidates:
-        if not pf.is_dir():
-            continue
-        try:
-            entries = list(pf.iterdir())
-        except PermissionError:
-            continue
-        for d in entries:
-            if not d.is_dir():
-                continue
-            score = -1
-            for exe, s in _MT5_MARKERS:
-                if (d / exe).exists():
-                    score = max(score, s)
-            if score >= 0:
-                found.append((score, d))
-    if not found:
-        return None
-    found.sort(key=lambda t: t[0], reverse=True)
-    return found[0][1]
-
-
-def _detect_mql5_from_cwd() -> Optional[Path]:
-    """Walk up from cwd; return first dir with ≥2 MQL5 marker subdirs."""
-    d = Path.cwd()
-    while True:
-        hits = sum(1 for m in _MQL5_MARKERS if (d / m).is_dir())
-        if hits >= 2:
-            return d
-        parent = d.parent
-        if parent == d:
-            return None
-        d = parent
-
-
 def _resolve_paths() -> tuple[Path, Path]:
-    """Return (MT5_BASE, MQL5_DIR) using the priority chain.
+    """Return (MT5_BASE, MQL5_DIR) from env vars or the project ``.env``.
 
-    MT5_BASE priority:  env var → Program Files scan → Wine fallback.
-    MQL5_DIR priority:  env var → cwd walk-up → MT5_BASE / "MQL5".
+    Both values are required — the script no longer scans Program
+    Files or walks the cwd tree for an MQL5 installation.  When a
+    value is missing it exits with an error naming the variable,
+    instead of guessing.
     """
-    # -- MT5_BASE --
-    if "MT5_BASE" in os.environ:
-        mt5_base = Path(os.environ["MT5_BASE"])
-    else:
-        found = _find_mt5_in_program_files()
-        if found is not None:
-            mt5_base = found
-        elif IS_WINDOWS:
-            print("Error: MetaTrader 5 not found. Set MT5_BASE in .hermes/.env")
-            sys.exit(1)
-        else:
-            mt5_base = Path.home() / ".wine/drive_c/Program Files/MetaTrader 5"
-
-    # -- MQL5_DIR --
-    if "MQL5_DIR" in os.environ:
-        mql5_dir = Path(os.environ["MQL5_DIR"])
-    else:
-        detected = _detect_mql5_from_cwd()
-        if detected is not None:
-            mql5_dir = detected
-            if "MT5_BASE" not in os.environ:
-                # Implicit: MT5 is one level above the MQL5 dir found by cwd walk
-                mt5_base = mql5_dir.parent
-        else:
-            mql5_dir = mt5_base / "MQL5"
-    return mt5_base, mql5_dir
+    missing = [
+        k for k in ("MT5_BASE", "MQL5_DIR") if not os.environ.get(k)
+    ]
+    if missing:
+        print(
+            "Error: required variable(s) not set: "
+            + ", ".join(missing)
+        )
+        print(
+            "  Define them in the project-root `.env` (or export them in "
+            "the environment), e.g.:"
+        )
+        print('    MT5_BASE="C:/Program Files/MetaTrader 5"')
+        print('    MQL5_DIR="C:/Program Files/MetaTrader 5/MQL5"')
+        sys.exit(1)
+    return Path(os.environ["MT5_BASE"]), Path(os.environ["MQL5_DIR"])
 
 
 # ---------------------------------------------------------------------------
@@ -214,23 +154,26 @@ def _to_editor_path(path: Path) -> str:
     """Return *path* in the format the MetaEditor CLI expects.
 
     On Windows native: the native path (backslashes).
-    On Wine: convert to Windows drive-letter style (``X:\\...``).
+    On Unix/Wine: prefix with ``WINE_DISK_ROOT`` (the drive letter
+    that maps to ``/`` under Wine, e.g. ``Z``) and keep forward
+    slashes, e.g. ``Z://home/USER/path/to/file.mq5``.  Requires
+    WINE_DISK_ROOT to be set; missing it is an error (never guessed
+    from the Wine prefix).
     """
     if IS_WINDOWS:
         return str(path)
-    # Wine path conversion
-    wine_prefix = Path(os.environ.get("WINEPREFIX", Path.home() / ".wine"))
-    for letter in "cdefgh":
-        drive_dir = wine_prefix / f"drive_{letter}"
-        if not drive_dir.is_dir():
-            continue
-        try:
-            rel = path.relative_to(drive_dir)
-            rel_str = rel.as_posix().replace("/", "\\")
-            return f"{letter.upper()}:\\{rel_str}"
-        except ValueError:
-            continue
-    return str(path)
+    drive = os.environ.get("WINE_DISK_ROOT", "").strip()
+    if not drive:
+        print(
+            "Error: WINE_DISK_ROOT is not set. "
+            "Set it in the project-root `.env` (the drive letter that "
+            "maps to `/` under Wine, e.g. `Z`)."
+        )
+        sys.exit(1)
+    drive = drive.rstrip(":")  # tolerate "Z:" as well as "Z"
+    # Absolute path with forward slashes, prefixed by the drive letter
+    # and a double slash:  Z://home/user/...
+    return f"{drive}://{path.as_posix().removeprefix('/')}"
 
 
 def _build_editor_cmd(editor: Path, flags: list[str]) -> list[str]:
@@ -295,17 +238,17 @@ def _check_timestamps(
     if expect_ex5:
         if ex5_path.exists() and ex5_path.stat().st_mtime > t_before:
             elapsed = time.time() - ex5_path.stat().st_mtime
-            print(f"  ✓ {ex5_path.name}  ({ex5_path.stat().st_mtime - t_before:.1f}s after start)")
+            print(f"  ✓ {ex5_path}  ({ex5_path.stat().st_mtime - t_before:.1f}s after start)")
         else:
             what = "not found" if not ex5_path.exists() else "stale (mtime before compile)"
-            issues.append(f"  ✗ {ex5_path.name} — {what}")
+            issues.append(f"  ✗ {ex5_path} — {what}")
 
     if log_path.exists() and log_path.stat().st_mtime > t_before:
         elapsed = time.time() - log_path.stat().st_mtime
-        print(f"  ✓ {log_path.name}  ({log_path.stat().st_mtime - t_before:.1f}s after start)")
+        print(f"  ✓ {log_path}  ({log_path.stat().st_mtime - t_before:.1f}s after start)")
     else:
         what = "not found" if not log_path.exists() else "stale (mtime before compile)"
-        issues.append(f"  ✗ {log_path.name} — {what}")
+        issues.append(f"  ✗ {log_path} — {what}")
 
     if issues:
         print("\n".join(issues))
@@ -335,12 +278,17 @@ def _print_log(log_path: Path, label: str = "Compilation log") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Core: deploy + run editor + freshness check
+# Core: run editor on the SOURCE path + freshness check
 # ---------------------------------------------------------------------------
 
 
 def _run_editor(src: Path, extra_flags: list[str], *, expect_ex5: bool) -> int:
-    """Deploy *src* to MQL5 dir, invoke MetaEditor, verify freshness.
+    """Invoke MetaEditor on *src* directly (no deploy) and verify freshness.
+
+    Compiles the source file in place — it does NOT copy *src* into the
+    MQL5 tree.  Output artifacts (``.ex5`` / ``.log``) land next to the
+    source, matching MetaEditor's CLI behaviour.  Use ``deploy`` if you
+    want the file copied into the MQL5 directory first.
 
     *extra_flags* — additional CLI flags for the editor (e.g. ``/s``).
     *expect_ex5* — True for ``compile``, False for ``check``.
@@ -360,25 +308,24 @@ def _run_editor(src: Path, extra_flags: list[str], *, expect_ex5: bool) -> int:
         print(f"Error: MetaEditor.exe not found in {MT5_BASE}")
         return 1
 
-    # Deploy to MQL5 tree
-    ptype = detect_type(src)
-    dest_dir = MQL5_DIR / TYPE_DIRS.get(ptype, "Experts")
-    dest = dest_dir / src.name
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
-    print(f"Deployed: {src.name} → {dest}")
-
     # Pre-remove stale outputs so they can't fake freshness
     t_before = time.time()
-    ex5_path = dest.with_suffix(".ex5")
-    log_path = dest.with_suffix(".log")
+    ex5_path = src.with_suffix(".ex5")
+    log_path = src.with_suffix(".log")
     for p in (ex5_path, log_path):
         if p.exists():
             p.unlink()
 
-    # Build command
-    compile_arg = f'/compile:"{_to_editor_path(dest)}"'
+    # Build command — compile_arg points at the SOURCE file path.
+    # NOTE: do NOT wrap the path in double quotes here.  With
+    # subprocess we pass a pre-split argv list; wine (Linux/macOS)
+    # and CreateProcess (Windows) receive each element as exactly one
+    # argument, and literal `"` characters become part of the path
+    # string MetaEditor sees, making it unresolvable.  Quoting is the
+    # shell's job, and we are not going through a shell.
+    compile_arg = f'/compile:{_to_editor_path(src)}'
     cmd = _build_editor_cmd(editor, [compile_arg, "/log", *extra_flags])
+    print(f"Running: {' '.join(cmd)}")
 
     # Run editor
     try:
@@ -434,7 +381,10 @@ def _run_editor(src: Path, extra_flags: list[str], *, expect_ex5: bool) -> int:
     print("  ✓ All expected outputs updated — compile succeeded\n"
           if expect_ex5 else
           "  ✓ Log updated — syntax check completed\n")
-    return result.returncode
+    # Success is decided by the freshness check above, NOT by the
+    # subprocess returncode: on Wine, MetaEditor is a GUI app and its
+    # exit code is unreliable (it can be non-zero even on success).
+    return 0
 
 
 def _wait_for_compile(log_path: Path, timeout: int = 30) -> None:
@@ -518,10 +468,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     print()
     if IS_WINDOWS:
         print("  PowerShell compile template:")
-        print(f'    & "{editor or MT5_BASE / "MetaEditor64.exe"}" /compile:"path\to\file.mq5" /log')
+        print(f'    & "{editor or MT5_BASE / "MetaEditor64.exe"}" /compile:"path\\to\\file.mq5" /log')
     else:
-        print(f"  Wine compile template:")
-        print(f'    wine "{editor or MT5_BASE / "MetaEditor64.exe"}" /compile:"Z:\\path\\to\\file.mq5" /log')
+        drive = os.environ.get("WINE_DISK_ROOT", "").strip().rstrip(":")
+        print("  Wine compile template (WINE_DISK_ROOT drive letter + double forward slash):")
+        print(f'    wine "{editor or MT5_BASE / "MetaEditor64.exe"}" /compile:"{drive}://home/USER/path/to/file.mq5" /log')
     return 0
 
 
@@ -555,17 +506,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     # Global option — must be parsed before subcommand so we can apply .env
     # before resolving MT5_BASE / MQL5_DIR.  When omitted, the script walks
-    # up from cwd looking for ``.hermes/.env`` (the default behaviour).
+    # up from cwd looking for the project-root ``.env`` (the default).
     parser.add_argument(
         "--env-file",
         type=Path,
         metavar="PATH",
-        help="Explicit .env file (overrides walk-up search for .hermes/.env).",
+        help="Explicit .env file (overrides walk-up search for .env).",
     )
     parser.add_argument(
         "--no-env",
         action="store_true",
-        help="Skip .env loading entirely; rely on env vars + auto-detection.",
+        help="Skip .env loading entirely; rely on env vars only.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
