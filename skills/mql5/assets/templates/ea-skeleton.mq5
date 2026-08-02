@@ -19,7 +19,7 @@ CTrade trade;
 bool   IsHedging;
 datetime lastBarTime = 0;
 
-#include "../templates/risk-helpers.mqh"
+#include "risk-helpers.mqh"
 
 //+------------------------------------------------------------------+
 //| CTrade setup — call once in OnInit().                            |
@@ -68,15 +68,22 @@ void OnTick() {
     if (!IsNewBar()) return;
 
     // Example: buy with 1% risk, 500-point SL.
+    // slPts is int: CalcSLFromPoints takes `int slPoints` — a double
+    // here would trigger warning 43 (possible loss of data).
     double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double slPts = 500;
+    int    slPts = 500;
     double sl    = CalcSLFromPoints(_Symbol, bid, slPts, /*isBuy=*/true);
     double lots  = CalcLotsFromSL(_Symbol,
         AccountInfoDouble(ACCOUNT_BALANCE), RiskPercent, bid, sl);
 
     // Verify loss matches risk budget — required before opening.
+    // OrderCalcProfit returns false on failure — always check it
+    // (warning 83 otherwise).
     double profit;
-    OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, lots, bid, sl, profit);
+    if (!OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, lots, bid, sl, profit)) {
+        Print("OrderCalcProfit failed — cannot size the trade safely");
+        return;
+    }
     PrintFormat("SL=%.5f lots=%.2f expected_loss=%.2f",
                 sl, lots, profit);
 
