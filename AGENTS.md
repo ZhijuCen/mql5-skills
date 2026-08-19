@@ -309,7 +309,20 @@ letter that maps to `/` under Wine on Unix (Linux/macOS); ignored on
 Windows. Wine paths are written `Z://home/USER/...` (drive letter +
 double forward slash). `compile`/`check` run MetaEditor directly on
 the source file path (no deploy) — `.ex5`/`.log` land next to the
-source; `deploy` copies into the MQL5 tree.
+source.
+
+**deploy** first compiles the `.mq5` via MetaEditor, then copies the
+resulting `.ex5` file into the correct MQL5 sub-directory. Type
+detection is done by analysing the source content for event functions
+and `#property service`:
+
+| Source marker          | Destination    |
+|------------------------|----------------|
+| `#property service`    | `Services/`    |
+| `OnCalculate`          | `Indicators/`  |
+| `OnTick`               | `Experts/`     |
+| `OnStart` (only)       | `Scripts/`     |
+| fallback               | `Experts/`     |
 
 ## Extraction Workflow
 

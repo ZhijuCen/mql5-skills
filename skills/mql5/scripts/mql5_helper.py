@@ -16,6 +16,10 @@ Usage:
     python skills/mql5/scripts/mql5_helper.py deploy FILE.mq5
     python skills/mql5/scripts/mql5_helper.py status
     python skills/mql5/scripts/mql5_helper.py list
+
+deploy compiles the .mq5 first, then copies the resulting .ex5 into
+the correct MQL5 sub-directory (Experts / Indicators / Scripts /
+Services) based on event functions found in the source code.
 """
 
 import argparse
@@ -184,7 +188,7 @@ def _build_editor_cmd(editor: Path, flags: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Type detection (path-only, no content read)
+# Type detection
 # ---------------------------------------------------------------------------
 
 
@@ -203,6 +207,91 @@ def detect_type(file_path: Path) -> str:
         if pl in ("include",):
             return "include"
     return "expert"
+
+
+# Event-function / property signatures that uniquely identify each MQL5
+# program type.  A match in the source content takes priority over the
+# path-based guess from detect_type().
+#
+# Detection order matters: services are checked FIRST because they also
+# contain OnTimer (shared with experts) — the #property service directive
+# is the decisive signal.
+
+_SERVICE_MARKERS: list[str] = [
+    r"#property\s+service",
+]
+
+
+def detect_type_from_source(file_path: Path) -> str:
+    """Detect program type by analysing the ``.mq5`` source content.
+
+    Reads the source file once and checks for event functions and
+    preprocessor directives that are unique to each program type.
+
+    Detection rules (in order of priority):
+
+    1. **Service** — ``#property service`` present  →  ``service``
+    2. **Service** — ``OnStart`` + ``OnTimer`` + ``OnDeinit``
+       (no ``OnTick`` / ``OnCalculate``)  →  ``service``
+    3. **Indicator** — ``OnCalculate`` present  →  ``indicator``
+    4. **Expert** — ``OnTick`` present  →  ``expert``
+    5. **Script** — ``OnStart`` present  →  ``script``
+    6. Fallback: ``expert``
+
+    Returns a key that maps to ``TYPE_DIRS`` (``expert``, ``indicator``,
+    ``script``, ``service``).
+    """
+    import re
+
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "expert"
+
+    # --- service markers -------------------------------------------------
+    for pat in _SERVICE_MARKERS:
+        if re.search(pat, text):
+            return "service"
+
+    # Collect which named events appear in the source
+    has = {name: False for name in (
+        "OnStart", "OnTimer", "OnDeinit", "OnTick",
+        "OnTrade", "OnChartEvent", "OnCalculate",
+    )}
+    for name in has:
+        if re.search(rf"\b{name}\b", text):
+            has[name] = True
+
+    # Service heuristic: OnStart + OnTimer + OnDeinit, but no OnTick/OnCalculate
+    if has["OnStart"] and has["OnTimer"] and has["OnDeinit"]:
+        if not has["OnTick"] and not has["OnCalculate"]:
+            return "service"
+
+    # --- indicator (OnCalculate is unique to indicators) -----------------
+    if has["OnCalculate"]:
+        return "indicator"
+
+    # --- expert (OnTick is unique to experts) ---------------------------
+    if has["OnTick"]:
+        return "expert"
+
+    # --- script (OnStart only, no timer/service signals) ----------------
+    if has["OnStart"]:
+        return "script"
+
+    return "expert"
+
+
+def resolve_type(src: Path) -> str:
+    """Return the program type, preferring source-content analysis.
+
+    If *src* is a ``.mq5`` file, the content is scanned for event
+    functions / ``#property service``.  Falls back to path-based
+    ``detect_type()`` if the content scan cannot decide.
+    """
+    if src.suffix.lower() == ".mq5":
+        return detect_type_from_source(src)
+    return detect_type(src)
 
 
 def _find_editor() -> Optional[Path]:
@@ -422,19 +511,51 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_deploy(args: argparse.Namespace) -> int:
-    """Deploy an MQ5 file to the MQL5 directory tree."""
+    """Compile an ``.mq5`` file then deploy the resulting ``.ex5`` to MQL5.
+
+    Steps:
+
+    1. Compile the source ``.mq5`` (via ``_run_editor``).
+    2. Analyse the source content for event functions / ``#property service``
+       to determine the correct MQL5 sub-directory.
+    3. Copy the ``.ex5`` file into ``MQL5_DIR/<subdir>/``.
+
+    The destination sub-directory is chosen by ``resolve_type()``, which
+    inspects the source file for type-specific markers:
+
+    * ``#property service``  →  ``Services/``
+    * ``OnCalculate``       →  ``Indicators/``
+    * ``OnTick``            →  ``Experts/``
+    * ``OnStart``           →  ``Scripts/``
+    * fallback              →  ``Experts/``
+    """
     src = Path(args.file).resolve()
     if not src.is_file():
         print(f"Error: {src} not found")
         return 1
-    ptype = detect_type(src)
+
+    # --- Step 1: compile -------------------------------------------------
+    print(f"Compiling {src.name} …")
+    rc = _run_editor(src, extra_flags=[], expect_ex5=True)
+    if rc != 0:
+        print("Error: compilation failed — aborting deploy.")
+        return rc
+
+    ex5 = src.with_suffix(".ex5")
+    if not ex5.is_file():
+        print(f"Error: compiled .ex5 not found: {ex5}")
+        return 1
+
+    # --- Step 2: detect type from source content -------------------------
+    ptype = resolve_type(src)
     dest_dir = MQL5_DIR / TYPE_DIRS.get(ptype, "Experts")
-    dest = dest_dir / src.name
     dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
-    print(f"Deployed: {src.name} → {dest}")
-    print(f"Type: {ptype}")
-    print("Compile in MetaEditor or via: mql5_helper.py compile FILE.mq5")
+    dest = dest_dir / ex5.name
+
+    # --- Step 3: copy .ex5 -----------------------------------------------
+    shutil.copy2(ex5, dest)
+    print(f"\nDeployed: {ex5.name} → {dest}")
+    print(f"Type:     {ptype}  (detected from source content)")
     return 0
 
 
@@ -529,7 +650,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     check_p = sub.add_parser("check", help="Syntax-check only (no .ex5 output)")
     check_p.add_argument("file", help="Path to .mq5 file")
 
-    deploy_p = sub.add_parser("deploy", help="Copy .mq5 to the MQL5 directory tree")
+    deploy_p = sub.add_parser("deploy", help="Compile .mq5 then deploy .ex5 to MQL5 tree")
     deploy_p.add_argument("file", help="Path to .mq5 file")
 
     args = parser.parse_args(argv)
