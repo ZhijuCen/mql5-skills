@@ -524,7 +524,22 @@ def print_report(r: Report, analyze_data: dict | None = None) -> None:
 
 # ── Trade Analysis ───────────────────────────────────────────────────
 
-def pair_trades(deals: list) -> list:
+def _position_type(deal: Deal) -> str:
+    """Return the position-type a deal belongs to.
+
+    An `in` deal's position-type IS its own type (a `sell` `in` opens a
+    short position). An `out` deal's position-type is the OPPOSITE of its
+    own type, because MT5 closes a short with a `buy` deal and a long with
+    a `sell` deal. Grouping by position-type (not by raw deal type) is what
+    lets an `in` deal find its own `out` deal when the two have opposite
+    types.
+    """
+    if deal.direction == "out":
+        return "sell" if deal.type == "buy" else "buy"
+    return deal.type
+
+
+def pair_trades(deals: list, orders: list | None = None) -> list:
     """Pair entry/exit deals into complete trades.
 
     Each trade is returned with two P&L views:
@@ -541,43 +556,115 @@ def pair_trades(deals: list) -> list:
     The MT5 accounting quirk (entry costs in GL regardless of trade
     outcome) is the reason we keep `gross_pnl` separate from `net`
     rather than overloading `net` to also drive GP/GL.
+
+    Pairing strategy
+    ----------------
+    Multi-position (hedging) EAs interleave deals across several open
+    positions (e.g. `in`, `in`, `out`, `out`), so a strict adjacent
+    in→out scan drops trades. Instead we maintain a per-(symbol,
+    position-type) FIFO stack of open entries and match each `out` deal
+    against the oldest still-open entry of the same position-type. This
+    handles hedging accounts (multiple entries open per type) and netting
+    accounts (one position per symbol, so stack depth ≤ 1).
+
+    • FIFO (oldest open closes first) is used for hedging; it is the MT5
+      convention for reconciling deal order. For netting accounts the
+      stack depth is at most 1, so FIFO and LIFO coincide.
+
+    `orders` is optional. When supplied it is indexed by order ticket so a
+    trade can pull the authoritative open/close times from the Order
+    record — the Order, not the Deal, carries the position's times
+    ("Deal has foreign key order; order has the time"). Fall back to the
+    deal times when not available.
     """
     trading = [d for d in deals if d.type != "balance"]
 
+    # Index orders by ticket (optional) so a trade can use the Order's
+    # authoritative open/close time when present.
+    order_map: dict = {}
+    if orders:
+        for o in orders:
+            order_map[o.order] = o
+
+    def open_time(deal: Deal) -> str:
+        o = order_map.get(deal.order)
+        return o.open_time if o and o.open_time else deal.time
+
+    def close_time(deal: Deal) -> str:
+        # For a closing deal its Order carries the fill/submit time;
+        # fall back to the deal time.
+        o = order_map.get(deal.order)
+        return o.close_time if o and o.close_time else deal.time
+
     trades = []
-    i = 0
-    while i < len(trading):
-        if trading[i].direction == "in":
-            entry = trading[i]
-            if i + 1 < len(trading) and trading[i + 1].direction == "out":
-                exit_d = trading[i + 1]
-                net = (exit_d.profit + entry.commission + exit_d.commission
-                       + entry.swap + exit_d.swap)
-                gross_pnl = exit_d.profit + exit_d.commission + exit_d.swap
-                sl_dist = 0.0
-                if "sl" in exit_d.comment:
-                    sl_dist = abs(entry.price - exit_d.price)
-                trades.append({
-                    "open_time": entry.time,
-                    "close_time": exit_d.time,
-                    "type": entry.type,
-                    "volume": entry.volume,
-                    "entry": entry.price,
-                    "exit": exit_d.price,
-                    "profit": exit_d.profit,
-                    "commission": entry.commission + exit_d.commission,
-                    "swap": entry.swap + exit_d.swap,
-                    "net": net,
-                    "gross_pnl": gross_pnl,
-                    "entry_costs": entry.commission + entry.swap,
-                    "comment": exit_d.comment,
-                    "sl_distance": sl_dist,
-                })
-                i += 2
+    # Stack of open entries, keyed by (symbol, position-type). Each entry
+    # tracks the remaining volume + un-attributed entry costs so partial
+    # closes (out.volume < entry.volume) can be split without mutating the
+    # original Deal objects.
+    stacks: dict = {}
+
+    for d in trading:
+        if d.direction == "in":
+            key = (d.symbol, _position_type(d))
+            stacks.setdefault(key, []).append({
+                "deal": d,
+                "volume": d.volume,
+                "commission": d.commission,
+                "swap": d.swap,
+            })
+        elif d.direction == "out":
+            key = (d.symbol, _position_type(d))
+            stack = stacks.get(key)
+            if not stack:
+                # Orphan `out` deal with no matching open entry (e.g. a
+                # position opened before the report window): cannot pair,
+                # so its P&L is not attributed to any trade.
+                continue
+
+            open_pos = stack[0]
+            # Volume matched by this close (never exceeding the entry's
+            # remaining volume; guard against over-close anomalies).
+            matched_vol = min(d.volume, open_pos["volume"])
+            is_full = matched_vol >= open_pos["volume"] - 1e-9
+
+            if is_full:
+                e_comm = open_pos["commission"]
+                e_swap = open_pos["swap"]
+                stack.pop(0)
             else:
-                i += 1
-        else:
-            i += 1
+                # Partial close: attribute entry costs proportionally to
+                # the closed portion; the remainder stays open.
+                frac = matched_vol / open_pos["volume"]
+                e_comm = open_pos["commission"] * frac
+                e_swap = open_pos["swap"] * frac
+                open_pos["volume"] -= matched_vol
+                open_pos["commission"] -= e_comm
+                open_pos["swap"] -= e_swap
+                if open_pos["volume"] <= 1e-9:
+                    stack.pop(0)
+
+            entry = open_pos["deal"]
+            net = (d.profit + e_comm + d.commission + e_swap + d.swap)
+            gross_pnl = d.profit + d.commission + d.swap
+            sl_dist = 0.0
+            if "sl" in d.comment:
+                sl_dist = abs(entry.price - d.price)
+            trades.append({
+                "open_time": open_time(entry),
+                "close_time": close_time(d),
+                "type": entry.type,
+                "volume": matched_vol,
+                "entry": entry.price,
+                "exit": d.price,
+                "profit": d.profit,
+                "commission": e_comm + d.commission,
+                "swap": e_swap + d.swap,
+                "net": net,
+                "gross_pnl": gross_pnl,
+                "entry_costs": e_comm + e_swap,
+                "comment": d.comment,
+                "sl_distance": sl_dist,
+            })
     return trades
 
 
@@ -617,7 +704,7 @@ def analyze_report(report: Report) -> dict:
     """Run full trade analysis on parsed report."""
 
     deposit = report.settings.initial_deposit
-    trades = pair_trades(report.deals)
+    trades = pair_trades(report.deals, report.orders)
 
     if not trades:
         return {"error": "No trades found", "trades": []}
@@ -1169,7 +1256,7 @@ def compute_windows(
     if bt_end <= bt_start:
         raise ValueError(f"bt_end {bt_end} <= bt_start {bt_start}")
 
-    trades = pair_trades(report.deals)
+    trades = pair_trades(report.deals, report.orders)
     # Assign each trade to a window by its open_time
     # First, build a global running balance series keyed by close_time,
     # so we can look up the balance at the left edge of any window.

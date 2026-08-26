@@ -17,4 +17,6 @@ ReportTester*.*
 !ReportTester-600xxxxx-hst.png
 !ReportTester-600xxxxx-mfemae.png
 
+.agents/
+.pi/
 .hermes/
