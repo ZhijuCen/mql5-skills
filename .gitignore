@@ -6,6 +6,7 @@ __pycache__/
 .extract.log
 html_cache/
 *cache*/
+*.lock
 
 *.log
 *.ex5

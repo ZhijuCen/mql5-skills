@@ -4,9 +4,10 @@ version = "0.1.0"
 description = "MQL5 Agent Skill for MetaTrader 5 development — extraction pipeline and risk formula verification"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
     "beautifulsoup4>=4.15.0",
     "pandas>=3.0.3",
     "requests>=2.34.2",
+    "ta-lib>=0.7.1",
 ]
