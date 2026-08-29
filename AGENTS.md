@@ -31,7 +31,7 @@ mql5-skills/
 ├── resources/             # Static resources
 │   └── random-user-agents.csv
 ├── skills/
-│   └── mql5/              # The MQL5 development skill
+│   ├── mql5/              # The MQL5 development skill
 │       ├── SKILL.md       # Skill definition (agentskills.io spec)
 │       ├── scripts/
 │       │   ├── mql5_helper.py            # Compile/deploy/status via Wine
@@ -54,6 +54,19 @@ mql5-skills/
 │           └── symbol-spec/  # Broker symbol specifications (CSV)
 │               ├── specs-XAUUSD.csv
 │               └── specs-USDJPY.csv
+│   └── mql5-ta/           # The MQL5 technical-analysis skill (TA-Lib)
+│       ├── SKILL.md       # Skill definition (agentskills.io spec)
+│       ├── scripts/
+│       │   ├── align_quotes.py  # Quote loading, mixed-TF detection & alignment
+│       │   └── parity_check.py  # MQL5 ↔ TA-Lib numeric parity checker
+│       ├── assets/
+│       │   ├── examples/using_talib_examples.py  # TA-Lib Function-API examples (4 classes)
+│       │   ├── mql5-side/TAParity-S.mq5  # Live-terminal parity export script
+│       │   └── quotes/    # Sample MT5 quote exports (XAUUSD M1/M15)
+│       │       └── abnormals/    # Mixed-timeframe regression file
+│       └── references/
+│           ├── docs-talib/           # TA-Lib documentation (per-group)
+│           └── indicator-mappings/   # MQL5 ↔ TA-Lib mapping tables (WIP)
 ├── jobs/                  # Backtest job folders
 │   ├── 250013-job.md      # Job specification
 │   └── ReportTester-250013/
@@ -139,7 +152,7 @@ python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count 
   the balance curve). For the full report this matches the HTML's
   Balance Drawdown Relative field exactly (44.60% vs 44.63% on
   246753; the 0.03% gap is from intra-trade floating P&L not in HTML).
-  Per the user's rule "如 Equity DD % 不可用，则以 Balance DD % 代替",
+  Per the user's rule "use Balance DD % when Equity DD % is unavailable",
   the script's `bal_dd_rel_pct` field is this balance-based relative
   DD.
 - Gross Profit / Gross Loss use MT5's split: each trade's exit-leg
@@ -152,9 +165,9 @@ python skills/mql5/scripts/parse_tester_report.py <report.html> windows --count 
   sub-windows, so the relative ranking is still meaningful.
 
 **Outlier flags per window (z-score vs window mean):**
-- `▲2σ` — at least one metric has |z| ≥ 2 (值得关注 — this
+- `▲2σ` — at least one metric has |z| ≥ 2 (notable — this
   window's value is far from the rest of the windows).
-- `■EXT` — at least one metric has |z| ≥ 5 (极端 — extreme outlier).
+- `■EXT` — at least one metric has |z| ≥ 5 (extreme outlier).
 - The marker is followed by `k=N` (count of outlier metrics) and
   the metric abbreviations with their signed z (e.g.
   `prof(+2.3σ),reco(+2.3σ)`).
@@ -178,7 +191,7 @@ high-variance strategy — harder to predict live performance.
   - **Balance DD Rel%** — MT5's STAT_BALANCE_DDREL_PERCENT (max
     relative drawdown). Our value matches the HTML's Balance
     Drawdown Relative field within 0.03%. Per the user's rule
-    "如 Equity DD % 不可用，则以 Balance DD % 代替" — this is what
+    "use Balance DD % when Equity DD % is unavailable" — this is what
     we do.
   - **Recovery Factor** — downstream of bal_dd_rel_abs.
   - **Sharpe Ratio** — MT5's reported value is inconsistent with the
@@ -352,20 +365,20 @@ See `docs-dev/naming.md` for full specification. Key rules:
 ## Ad-hoc Verification
 
 No formal test suite. Scripts are verified via temporary scripts under `/tmp` with
-`hermes-verify-` filename prefix. Pattern:
+`agent-verify-` filename prefix. Pattern:
 
-1. Write a focused verification script to `/tmp/hermes-verify-<topic>.py`
+1. Write a focused verification script to `/tmp/agent-verify-<topic>.py`
 2. Import the changed functions, exercise them with known inputs
-3. Run via `uv run python /tmp/hermes-verify-<topic>.py` (requires project venv for deps)
+3. Run via `uv run python /tmp/agent-verify-<topic>.py` (requires project venv for deps)
 4. Clean up the temp file after passing
 
 Example (from `parse_tester_report.py` changes):
 ```bash
-# Create /tmp/hermes-verify-parse-tester.py with test cases
+# Create /tmp/agent-verify-parse-tester.py with test cases
 # Run:
-uv run python /tmp/hermes-verify-parse-tester.py
+uv run python /tmp/agent-verify-parse-tester.py
 # Clean up:
-rm /tmp/hermes-verify-parse-tester.py
+rm /tmp/agent-verify-parse-tester.py
 ```
 
 ## Git Workflow
