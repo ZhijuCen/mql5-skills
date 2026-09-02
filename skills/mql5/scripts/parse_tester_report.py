@@ -563,10 +563,9 @@ def pair_trades(deals: list) -> list:
     Pairing strategy
     ----------------
     Deals are paired directly — no order-deal binding.  For each
-    position-type group ("buy" or "sell") we maintain a FIFO stack
-    of open `in` deals; each `out` deal consumes volume from the
-    oldest open entry.  Orphaned `out` deals (no matching `in`) are
-    skipped.
+    (symbol, position-type) group we maintain a FIFO stack of open
+    `in` deals; each `out` deal consumes volume from the oldest
+    open entry.  Orphaned `out` deals (no matching `in`) are skipped.
 
     `buy in` pairs with `sell out`; `sell in` pairs with `buy out`.
     Times come from the deals themselves — no Order record needed.
@@ -574,14 +573,14 @@ def pair_trades(deals: list) -> list:
     trading = [d for d in deals if d.type != "balance"]
 
     trades = []
-    # Stack of open entries, keyed by position-type. Each entry is
-    # {"deal": Deal, "volume": float (remaining), "commission": float
-    # (remaining), "swap": float (remaining)}.
+    # Stack of open entries, keyed by (symbol, position-type). Each
+    # entry is {"deal": Deal, "volume": float (remaining),
+    # "commission": float (remaining), "swap": float (remaining)}.
     stacks: dict = {}
 
     for d in trading:
         if d.direction == "in":
-            key = _position_type(d)
+            key = (d.symbol, _position_type(d))
             stacks.setdefault(key, []).append({
                 "deal": d,
                 "volume": d.volume,
@@ -589,7 +588,7 @@ def pair_trades(deals: list) -> list:
                 "swap": d.swap,
             })
         elif d.direction == "out":
-            key = _position_type(d)
+            key = (d.symbol, _position_type(d))
             stack = stacks.get(key)
             if not stack:
                 continue  # orphan out — no matching open entry
