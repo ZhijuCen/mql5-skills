@@ -1299,6 +1299,18 @@ def compute_windows(
     return out
 
 
+def _median(vals: list[float]) -> float:
+    """Median of vals (mean of the two middle values for even N)."""
+    s = sorted(vals)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    if n % 2 == 1:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
 def _mean_std(vals: list[float]) -> tuple[float, float]:
     """Return (mean, sample_std_n_minus_1) of vals. std=0 if N<2."""
     n = len(vals)
@@ -1358,6 +1370,8 @@ def windows_comparison(windows: list[dict]) -> dict:
                          "max_abs_z_metric": str}, ...],
         "mean":       {"profit": ..., ...},
         "std":        {"profit": ..., ...},
+        "sum":        {"profit": ..., ...},
+        "median":     {"profit": ..., ...},
         "thresholds": {"notable": 2.0, "extreme": 5.0},
         "summary":    {"notable_windows": int, "extreme_windows": int,
                        "n_windows": int},
@@ -1366,11 +1380,15 @@ def windows_comparison(windows: list[dict]) -> dict:
     # Per-metric mean and std across all windows
     mean_map: dict = {}
     std_map: dict = {}
+    sum_map: dict = {}
+    median_map: dict = {}
     for m in ALL_METRICS:
         vals = [w.get(m, 0.0) for w in windows]
         mn, sd = _mean_std(vals)
         mean_map[m] = round(mn, 4)
         std_map[m] = round(sd, 4)
+        sum_map[m] = round(sum(vals), 4)
+        median_map[m] = round(_median(vals), 4)
 
     per_window = []
     for w in windows:
@@ -1408,6 +1426,8 @@ def windows_comparison(windows: list[dict]) -> dict:
         "per_window": per_window,
         "mean": mean_map,
         "std": std_map,
+        "sum": sum_map,
+        "median": median_map,
         "thresholds": {"notable": SIGMA_NOTABLE, "extreme": SIGMA_EXTREME},
         "summary": {
             "notable_windows": n_notable,
@@ -1536,6 +1556,18 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
               f"{comparison['std'].get('trades', 0):>6.2f} "
               f"{comparison['std'].get('sharpe_ratio', 0):>8.2f} "
               f"{comparison['std'].get('growth', 0):>7.2f}")
+        sm = comparison["sum"]
+        print(f"  {'SUM':<4} {sm.get('profit', 0):>10,.2f} "
+              f"{sm.get('expected_payoff', 0):>8.2f} "
+              f"{sm.get('profit_factor', 0):>6.2f} {sm.get('recovery_factor', 0):>6.2f} "
+              f"{sm.get('bal_dd_rel_pct', 0):>7.2f} {sm.get('trades', 0):>6.0f} "
+              f"{sm.get('sharpe_ratio', 0):>8.2f} {sm.get('growth', 0):>7.2f}")
+        md = comparison["median"]
+        print(f"  {'MEDIAN':<4} {md.get('profit', 0):>10,.2f} "
+              f"{md.get('expected_payoff', 0):>8.2f} "
+              f"{md.get('profit_factor', 0):>6.2f} {md.get('recovery_factor', 0):>6.2f} "
+              f"{md.get('bal_dd_rel_pct', 0):>7.2f} {md.get('trades', 0):>6.0f} "
+              f"{md.get('sharpe_ratio', 0):>8.2f} {md.get('growth', 0):>7.2f}")
         print()
 
     # For N=1: cross-check computed values vs HTML report
