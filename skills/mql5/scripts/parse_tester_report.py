@@ -970,7 +970,12 @@ def compute_window_metrics(
     t_start: datetime | None = None,
     t_end: datetime | None = None,
 ) -> dict:
-    """Compute the 7-window-metrics for a list of trades.
+    """Compute core window metrics for a list of trades.
+
+    Returns profit, expected_payoff, profit_factor, recovery_factor,
+    bal_dd_rel_pct, bal_dd_rel_abs, trades, sharpe_ratio (annualized),
+    and sharpe_ratio_raw (per-trade). The growth metric is computed
+    externally in compute_windows (net profit / starting balance).
 
     `starting_balance` is the equity at the left edge of the window
     (the balance just before any trade in this window opens).
@@ -1302,6 +1307,13 @@ def compute_windows(
             in_window, start_bal, deposit, window_days,
             t_start=t_start, t_end=t_end,
         )
+        # growth: net profit / starting balance expressed as percentage.
+        # The starting balance is the balance at t_start (last known balance
+        # before any trade in this window opens). Cross-window trades (opened
+        # in window k-1, exited in window k) update the balance_curve at
+        # their close_time; balance_at(t_start) already includes those
+        # updates when close_time >= t_start.
+        growth = (m['profit'] / start_bal * 100) if start_bal != 0 else 0.0
         out.append({
             "window_idx": k,
             "t_start": t_start.strftime("%Y.%m.%d"),
@@ -1309,6 +1321,7 @@ def compute_windows(
             "window_seconds": (t_end - t_start).total_seconds(),
             "start_balance": round(start_bal, 2),
             "end_balance": round(end_bal, 2),
+            "growth": round(growth, 2),
             **m,
         })
     return out
@@ -1343,11 +1356,12 @@ ALL_METRICS = [
     "bal_dd_rel_pct",
     "trades",
     "sharpe_ratio",
+    "growth",
 ]
 
 
 def windows_comparison(windows: list[dict]) -> dict:
-    """Per-window z-score outlier scan across the 7 core metrics.
+    """Per-window z-score outlier scan across the 8 core metrics.
 
     For each metric, compute mean and sample std across all windows,
     then for each window compute z = (val - mean) / std. Flag any
@@ -1432,7 +1446,10 @@ def windows_comparison(windows: list[dict]) -> dict:
 
 
 def print_windows(report: Report, windows: list[dict], comparison: dict) -> None:
-    """Pretty-print the windows analysis as a text table."""
+    """Pretty-print the windows analysis as a text table.
+
+    Shows 8 metrics: Profit, EP, PF, RF, BalDD%, Trades, Sharpe, Growth%.
+    """
     print("=" * 96)
     print(f"  Windows Analysis  (backtest split into {len(windows)} equal time slices)")
     print("=" * 96)
@@ -1506,8 +1523,8 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
 
     # Metrics table
     print(f"  {'Win':<4} {'Profit':>10} {'EP':>8} {'PF':>6} {'RF':>6} "
-          f"{'BalDD%':>7} {'Trades':>6} {'Sharpe':>8}  Outliers")
-    print("  " + "─" * 102)
+          f"{'BalDD%':>7} {'Trades':>6} {'Sharpe':>8} {'Growth%':>8}  Outliers")
+    print("  " + "─" * 110)
     for w, flags in zip(windows, comparison["per_window"]):
         # Build a compact outlier marker: max level, count, and metric
         if flags["extreme_count"] > 0:
@@ -1527,7 +1544,7 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
         print(f"  {w['window_idx']:<4} {w['profit']:>10,.2f} {w['expected_payoff']:>8.2f} "
               f"{w['profit_factor']:>6.2f} {w['recovery_factor']:>6.2f} "
               f"{w['bal_dd_rel_pct']:>7.2f} {w['trades']:>6} "
-              f"{w['sharpe_ratio']:>8.2f}  {marker}")
+              f"{w['sharpe_ratio']:>8.2f} {w['growth']:>7.2f}  {marker}")
     print()
 
     # Mean row (the reference for z-scores). Only meaningful with N>=2.
@@ -1537,7 +1554,7 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
               f"{mn.get('expected_payoff', 0):>8.2f} "
               f"{mn.get('profit_factor', 0):>6.2f} {mn.get('recovery_factor', 0):>6.2f} "
               f"{mn.get('bal_dd_rel_pct', 0):>7.2f} {mn.get('trades', 0):>6.0f} "
-              f"{mn.get('sharpe_ratio', 0):>8.2f}")
+              f"{mn.get('sharpe_ratio', 0):>8.2f} {mn.get('growth', 0):>7.2f}")
         print(f"  {'STD':<4} "
               f"{comparison['std'].get('profit', 0):>10,.2f} "
               f"{comparison['std'].get('expected_payoff', 0):>8.2f} "
@@ -1545,7 +1562,8 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
               f"{comparison['std'].get('recovery_factor', 0):>6.2f} "
               f"{comparison['std'].get('bal_dd_rel_pct', 0):>7.2f} "
               f"{comparison['std'].get('trades', 0):>6.2f} "
-              f"{comparison['std'].get('sharpe_ratio', 0):>8.2f}")
+              f"{comparison['std'].get('sharpe_ratio', 0):>8.2f} "
+              f"{comparison['std'].get('growth', 0):>7.2f}")
         print()
 
     # For N=1: cross-check computed values vs HTML report
