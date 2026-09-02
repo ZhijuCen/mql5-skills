@@ -1234,6 +1234,23 @@ def compute_windows(
         raise ValueError(f"bt_end {bt_end} <= bt_start {bt_start}")
 
     trades = pair_trades(report.deals)
+    # Pre-parse trading deal times once for per-window deal counts.
+    # Only buy/sell deals with a direction count; balance operations are
+    # excluded. The four (type, direction) combos map to:
+    #   buy in  -> opens a long    (deals_buy_in)
+    #   sell in -> opens a short   (deals_sell_in)
+    #   sell out-> closes a long   (deals_sell_out)
+    #   buy out -> closes a short  (deals_buy_out)
+    deal_records = []
+    for d in report.deals:
+        if d.type not in ("buy", "sell") or d.direction not in ("in", "out"):
+            continue
+        try:
+            dt = datetime.strptime(d.time, "%Y.%m.%d %H:%M:%S")
+        except ValueError:
+            continue
+        deal_records.append((dt, d.type, d.direction))
+
     # Assign each trade to a window by its open_time
     # First, build a global running balance series keyed by close_time,
     # so we can look up the balance at the left edge of any window.
@@ -1275,6 +1292,22 @@ def compute_windows(
         start_bal = balance_at(t_start)
         end_bal = balance_at(t_end)
         window_days = (t_end - t_start).total_seconds() / 86400.0
+        # Count deals by (type, direction) whose time falls in
+        # [t_start, t_end). Note: deal counts are by deal time, trade
+        # counts are by open_time — the two are not the same population.
+        deals_buy_in = deals_sell_in = deals_sell_out = deals_buy_out = 0
+        for dt, ty, dirn in deal_records:
+            if t_start <= dt < t_end:
+                if dirn == "in":
+                    if ty == "buy":
+                        deals_buy_in += 1
+                    else:
+                        deals_sell_in += 1
+                else:
+                    if ty == "sell":
+                        deals_sell_out += 1
+                    else:
+                        deals_buy_out += 1
         m = compute_window_metrics(
             in_window, start_bal, deposit, window_days,
             t_start=t_start, t_end=t_end,
@@ -1294,6 +1327,10 @@ def compute_windows(
             "start_balance": round(start_bal, 2),
             "end_balance": round(end_bal, 2),
             "growth": round(growth, 2),
+            "deals_buy_in": deals_buy_in,
+            "deals_sell_in": deals_sell_in,
+            "deals_sell_out": deals_sell_out,
+            "deals_buy_out": deals_buy_out,
             **m,
         })
     return out
@@ -1451,10 +1488,13 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
     print(f"  Initial Deposit: {s.initial_deposit:,.2f}")
     print()
 
-    # Window boundaries
+    # Window boundaries + trade/deal counts. Trades is shown HERE only
+    # (not repeated in the metrics table); the four deal columns break
+    # each window's deal flow into opens/closes per side.
     print(f"  {'Win':<4} {'Start':<12} {'End':<12} {'Days':>6} "
-          f"{'StartBal':>10} {'EndBal':>10} {'Trades':>6}")
-    print("  " + "─" * 76)
+          f"{'StartBal':>10} {'EndBal':>10} {'Trades':>6} "
+          f"{'BuyIn':>6} {'SellOut':>7} {'SellIn':>6} {'BuyOut':>6}")
+    print("  " + "─" * 101)
     total_days = 0.0
     for w in windows:
         t_s = datetime.strptime(w["t_start"], "%Y.%m.%d")
@@ -1463,47 +1503,29 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
         total_days += days
         print(f"  {w['window_idx']:<4} {w['t_start']:<12} {w['t_end']:<12} "
               f"{days:>6.1f} {w['start_balance']:>10,.2f} {w['end_balance']:>10,.2f} "
-              f"{w['trades']:>6}")
-    print(f"  {'─'*76}\n")
+              f"{w['trades']:>6} {w.get('deals_buy_in', 0):>6} "
+              f"{w.get('deals_sell_out', 0):>7} {w.get('deals_sell_in', 0):>6} "
+              f"{w.get('deals_buy_out', 0):>6}")
+    print(f"  {'─'*101}\n")
 
     # Time composition per window — Idle / Max-hold / Win-rate.
-    # Skipped silently if the windows list predates this field (i.e.
+    # Skipped silently if the windows list predates these fields (i.e.
     # if compute_windows was called without t_start/t_end, which only
     # happens with hand-crafted test fixtures — production callers
-    # always pass them).
+    # always pass them). Days lives in the first table.
     if all("idle_seconds" in w for w in windows):
-        # Per-window percentages are computed against each window's
-        # own length (idle_in_window / window_length), so they are
-        # NOT additive across windows — N windows can sum to N*100%
-        # in the worst case. The total row at the bottom aggregates
-        # in absolute time across all windows.
-        #
-        # window_seconds is reconstructed as idle + in_pos rather
-        # than parsing t_start/t_end with strptime('%Y.%m.%d'),
-        # because the stored t_start/t_end are date-only strings
-        # truncated from the real datetime boundaries — re-parsing
-        # them would round the window length down to whole days and
-        # drift the percentage by up to 1/2 day. The windowing code
-        # in compute_windows uses full-precision datetimes; pairing
-        # with idle_seconds keeps the ratio exact.
-        print(f"  {'Win':<4} {'Days':>6} {'MinIdle':>10} {'MaxIdle':>10} {'AvgIdle':>10} "
+        print(f"  {'Win':<4} {'MinIdle':>10} {'MaxIdle':>10} {'AvgIdle':>10} "
               f"{'MinHold':>10} {'MaxHold':>10} {'AvgHold':>10} "
               f"{'WinRate':>8}")
-        print("  " + "─" * 102)
+        print("  " + "─" * 95)
         for w in windows:
-            if "window_seconds" in w:
-                window_seconds = w["window_seconds"]
-            else:
-                t_s = datetime.strptime(w["t_start"], "%Y.%m.%d")
-                t_e = datetime.strptime(w["t_end"], "%Y.%m.%d")
-                window_seconds = max(1.0, (t_e - t_s).total_seconds())
             min_idle = w["min_idle_seconds"]
             max_idle = w["max_idle_seconds"]
             avg_idle = w["avg_idle_seconds"]
             min_hold = w["min_hold_seconds"]
             max_hold = w["max_hold_seconds"]
             avg_hold = w["avg_hold_seconds"]
-            print(f"  {w['window_idx']:<4} {window_seconds/86400.0:>6.1f} "
+            print(f"  {w['window_idx']:<4} "
                   f"{format_duration(timedelta(seconds=min_idle)):>10} "
                   f"{format_duration(timedelta(seconds=max_idle)):>10} "
                   f"{format_duration(timedelta(seconds=avg_idle)):>10} "
@@ -1513,10 +1535,12 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
                   f"{w['win_rate']*100:>7.1f}%")
         print()
 
-    # Metrics table
+    # Metrics table — Trades lives in the first table (with deal
+    # counts); here it only participates in the outlier scan (ALL_METRICS
+    # includes 'trades', so a trades outlier shows as e.g. trad(+2.3σ)).
     print(f"  {'Win':<4} {'Profit':>10} {'EP':>8} {'PF':>6} {'RF':>6} "
-          f"{'BalDD%':>7} {'Trades':>6} {'Sharpe':>8} {'Growth%':>8}  Outliers")
-    print("  " + "─" * 110)
+          f"{'BalDD%':>7} {'Sharpe':>8} {'Growth%':>8}  Outliers")
+    print("  " + "─" * 103)
     for w, flags in zip(windows, comparison["per_window"]):
         # Build a compact outlier marker: max level, count, and metric
         if flags["extreme_count"] > 0:
@@ -1535,17 +1559,18 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
             marker = level
         print(f"  {w['window_idx']:<4} {w['profit']:>10,.2f} {w['expected_payoff']:>8.2f} "
               f"{w['profit_factor']:>6.2f} {w['recovery_factor']:>6.2f} "
-              f"{w['bal_dd_rel_pct']:>7.2f} {w['trades']:>6} "
+              f"{w['bal_dd_rel_pct']:>7.2f} "
               f"{w['sharpe_ratio']:>8.2f} {w['growth']:>7.2f}  {marker}")
     print()
 
     # Mean row (the reference for z-scores). Only meaningful with N>=2.
+    # NOTE: no Trades column here — Trades is shown in the first table.
     if len(windows) >= 2:
         mn = comparison["mean"]
         print(f"  {'MEAN':<4} {mn.get('profit', 0):>10,.2f} "
               f"{mn.get('expected_payoff', 0):>8.2f} "
               f"{mn.get('profit_factor', 0):>6.2f} {mn.get('recovery_factor', 0):>6.2f} "
-              f"{mn.get('bal_dd_rel_pct', 0):>7.2f} {mn.get('trades', 0):>6.0f} "
+              f"{mn.get('bal_dd_rel_pct', 0):>7.2f} "
               f"{mn.get('sharpe_ratio', 0):>8.2f} {mn.get('growth', 0):>7.2f}")
         print(f"  {'STD':<4} "
               f"{comparison['std'].get('profit', 0):>10,.2f} "
@@ -1553,20 +1578,19 @@ def print_windows(report: Report, windows: list[dict], comparison: dict) -> None
               f"{comparison['std'].get('profit_factor', 0):>6.2f} "
               f"{comparison['std'].get('recovery_factor', 0):>6.2f} "
               f"{comparison['std'].get('bal_dd_rel_pct', 0):>7.2f} "
-              f"{comparison['std'].get('trades', 0):>6.2f} "
               f"{comparison['std'].get('sharpe_ratio', 0):>8.2f} "
               f"{comparison['std'].get('growth', 0):>7.2f}")
         sm = comparison["sum"]
         print(f"  {'SUM':<4} {sm.get('profit', 0):>10,.2f} "
               f"{sm.get('expected_payoff', 0):>8.2f} "
               f"{sm.get('profit_factor', 0):>6.2f} {sm.get('recovery_factor', 0):>6.2f} "
-              f"{sm.get('bal_dd_rel_pct', 0):>7.2f} {sm.get('trades', 0):>6.0f} "
+              f"{sm.get('bal_dd_rel_pct', 0):>7.2f} "
               f"{sm.get('sharpe_ratio', 0):>8.2f} {sm.get('growth', 0):>7.2f}")
         md = comparison["median"]
         print(f"  {'MEDIAN':<4} {md.get('profit', 0):>10,.2f} "
               f"{md.get('expected_payoff', 0):>8.2f} "
               f"{md.get('profit_factor', 0):>6.2f} {md.get('recovery_factor', 0):>6.2f} "
-              f"{md.get('bal_dd_rel_pct', 0):>7.2f} {md.get('trades', 0):>6.0f} "
+              f"{md.get('bal_dd_rel_pct', 0):>7.2f} "
               f"{md.get('sharpe_ratio', 0):>8.2f} {md.get('growth', 0):>7.2f}")
         print()
 
