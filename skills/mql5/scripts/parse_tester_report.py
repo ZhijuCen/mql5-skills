@@ -12,8 +12,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import re
+import statistics
 import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
@@ -1281,6 +1283,8 @@ def compute_windows(
     # Assign each trade to a window by its open_time
     # First, build a global running balance series keyed by close_time,
     # so we can look up the balance at the left edge of any window.
+    # Kept as two parallel lists so balance_at() can bisect instead of
+    # scanning (O(log n) per window edge vs O(n) linear).
     balance_curve: list[tuple[datetime, float]] = [(bt_start, deposit)]
     bal = deposit
     for t in trades:
@@ -1290,16 +1294,12 @@ def compute_windows(
             continue
         bal += t["net"]
         balance_curve.append((close_dt, bal))
+    curve_times = [ts for ts, _ in balance_curve]
 
     def balance_at(left_edge: datetime) -> float:
         """Return the last known balance at or before `left_edge`."""
-        b = deposit
-        for ts, v in balance_curve:
-            if ts <= left_edge:
-                b = v
-            else:
-                break
-        return b
+        i = bisect.bisect_right(curve_times, left_edge)
+        return balance_curve[i - 1][1] if i > 0 else deposit
 
     total_seconds = (bt_end - bt_start).total_seconds()
     out = []
@@ -1363,18 +1363,6 @@ def compute_windows(
     return out
 
 
-def _median(vals: list[float]) -> float:
-    """Median of vals (mean of the two middle values for even N)."""
-    s = sorted(vals)
-    n = len(s)
-    if n == 0:
-        return 0.0
-    mid = n // 2
-    if n % 2 == 1:
-        return s[mid]
-    return (s[mid - 1] + s[mid]) / 2.0
-
-
 def _mean_std(vals: list[float]) -> tuple[float, float]:
     """Return (mean, sample_std_n_minus_1) of vals. std=0 if N<2."""
     n = len(vals)
@@ -1382,9 +1370,7 @@ def _mean_std(vals: list[float]) -> tuple[float, float]:
         return 0.0, 0.0
     if n == 1:
         return vals[0], 0.0
-    mean = sum(vals) / n
-    var = sum((x - mean) ** 2 for x in vals) / (n - 1)
-    return mean, var ** 0.5
+    return statistics.fmean(vals), statistics.stdev(vals)
 
 
 # Thresholds for notable / extreme outliers in windows analysis.
@@ -1452,7 +1438,7 @@ def windows_comparison(windows: list[dict]) -> dict:
         mean_map[m] = round(mn, 4)
         std_map[m] = round(sd, 4)
         sum_map[m] = round(sum(vals), 4)
-        median_map[m] = round(_median(vals), 4)
+        median_map[m] = round(statistics.median(vals) if vals else 0.0, 4)
 
     per_window = []
     for w in windows:
