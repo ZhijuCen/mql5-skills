@@ -565,7 +565,13 @@ def pair_trades(deals: list) -> list:
     Deals are paired directly — no order-deal binding.  For each
     (symbol, position-type) group we maintain a FIFO stack of open
     `in` deals; each `out` deal consumes volume from the oldest
-    open entry.  Orphaned `out` deals (no matching `in`) are skipped.
+    open entries.  Orphaned `out` deals (no matching `in`) are skipped.
+
+    ONE out deal = ONE trade record, matching MT5's TotalTrades
+    (one trade per closing deal). When a single out deal closes
+    several open entries, the entry side is aggregated (volume-
+    weighted entry price, earliest open_time, summed costs) instead
+    of being split into multiple records.
 
     `buy in` pairs with `sell out`; `sell in` pairs with `buy out`.
     Times come from the deals themselves — no Order record needed.
@@ -593,50 +599,71 @@ def pair_trades(deals: list) -> list:
             if not stack:
                 continue  # orphan out — no matching open entry
 
-            # Consume volume from oldest open entries (FIFO).
+            # Consume volume from oldest open entries (FIFO), collecting
+            # entry-side segments. ONE out deal = ONE trade record, even
+            # when it closes several open entries — this matches MT5's
+            # TotalTrades (one trade per closing deal). Multi-entry
+            # segments are aggregated: entry price is volume-weighted,
+            # open_time is the EARLIEST entry (the decision moment for
+            # window attribution), entry costs are summed.
             remaining_out = d.volume
+            matched_vol = 0.0
+            e_comm_sum = 0.0
+            e_swap_sum = 0.0
+            w_price = 0.0  # volume-weighted entry price accumulator
+            first_entry = None
             while remaining_out > 1e-9 and stack:
                 open_pos = stack[0]
-                matched_vol = min(remaining_out, open_pos["volume"])
-                frac = matched_vol / open_pos["volume"]
+                seg_vol = min(remaining_out, open_pos["volume"])
+                frac = seg_vol / open_pos["volume"]
                 e_comm = open_pos["commission"] * frac
                 e_swap = open_pos["swap"] * frac
                 entry = open_pos["deal"]
 
                 # Deduct from the entry
-                open_pos["volume"] -= matched_vol
+                open_pos["volume"] -= seg_vol
                 open_pos["commission"] -= e_comm
                 open_pos["swap"] -= e_swap
                 if open_pos["volume"] <= 1e-9:
                     stack.pop(0)
 
-                vol_frac = matched_vol / d.volume
-                net = (d.profit * vol_frac + e_comm
-                       + d.commission * vol_frac + e_swap
-                       + d.swap * vol_frac)
-                gross_pnl = (d.profit * vol_frac
-                             + d.commission * vol_frac
-                             + d.swap * vol_frac)
-                sl_dist = 0.0
-                if "sl" in d.comment:
-                    sl_dist = abs(entry.price - d.price)
-                trades.append({
-                    "open_time": entry.time,
-                    "close_time": d.time,
-                    "type": entry.type,
-                    "volume": matched_vol,
-                    "entry": entry.price,
-                    "exit": d.price,
-                    "profit": round(d.profit * vol_frac, 2),
-                    "commission": round(e_comm + d.commission * vol_frac, 2),
-                    "swap": round(e_swap + d.swap * vol_frac, 2),
-                    "net": round(net, 2),
-                    "gross_pnl": round(gross_pnl, 2),
-                    "entry_costs": round(e_comm + e_swap, 2),
-                    "comment": d.comment,
-                    "sl_distance": sl_dist,
-                })
-                remaining_out -= matched_vol
+                matched_vol += seg_vol
+                e_comm_sum += e_comm
+                e_swap_sum += e_swap
+                w_price += entry.price * seg_vol
+                if first_entry is None:
+                    first_entry = entry
+                remaining_out -= seg_vol
+
+            if first_entry is None:
+                continue
+            vol_frac = matched_vol / d.volume if d.volume > 0 else 0.0
+            entry_price = w_price / matched_vol if matched_vol > 0 else 0.0
+            net = (d.profit * vol_frac + e_comm_sum
+                   + d.commission * vol_frac + e_swap_sum
+                   + d.swap * vol_frac)
+            gross_pnl = (d.profit * vol_frac
+                         + d.commission * vol_frac
+                         + d.swap * vol_frac)
+            sl_dist = 0.0
+            if "sl" in d.comment:
+                sl_dist = abs(entry_price - d.price)
+            trades.append({
+                "open_time": first_entry.time,
+                "close_time": d.time,
+                "type": first_entry.type,
+                "volume": matched_vol,
+                "entry": round(entry_price, 5),
+                "exit": d.price,
+                "profit": round(d.profit * vol_frac, 2),
+                "commission": round(e_comm_sum + d.commission * vol_frac, 2),
+                "swap": round(e_swap_sum + d.swap * vol_frac, 2),
+                "net": round(net, 2),
+                "gross_pnl": round(gross_pnl, 2),
+                "entry_costs": round(e_comm_sum + e_swap_sum, 2),
+                "comment": d.comment,
+                "sl_distance": sl_dist,
+            })
     return trades
 
 
