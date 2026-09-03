@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-MQL5 development helper: compile, check, deploy, list, status.
+MQL5 development helper: compile, check, deploy, list, status,
+init-ini (generate a Tester INI skeleton from .mq5 inputs),
+backtest (headless single test via terminal64.exe /portable /config:).
 
 Supports Windows 10+ natively (PowerShell) and Linux/Wine.
 
@@ -16,18 +18,38 @@ Usage:
     python skills/mql5/scripts/mql5_helper.py deploy FILE.mq5
     python skills/mql5/scripts/mql5_helper.py status
     python skills/mql5/scripts/mql5_helper.py list
+    python skills/mql5/scripts/mql5_helper.py init-ini FILE.mq5 [OPTS]
+    python skills/mql5/scripts/mql5_helper.py backtest INI [OPTS]
 
 deploy compiles the .mq5 first, then copies the resulting .ex5 into
 the correct MQL5 sub-directory (Experts / Indicators / Scripts /
 Services) based on event functions found in the source code.
+
+init-ini parses every ``input`` / ``sinput`` declaration in the .mq5
+source and emits a [Tester]/[TesterInputs] INI skeleton where each
+line is ``name=default||start||step||stop||Y|N`` — inputs omitted
+from [TesterInputs] silently fall back to EA source defaults, so the
+skeleton lists ALL of them.
+
+backtest runs a single Strategy Tester test headlessly: it validates
+and normalizes the INI, stages it at a space-free Windows path,
+launches the terminal against a dedicated runner instance (cloned
+from MT5_BASE on first use, so the user's GUI terminal is not
+disturbed), polls process exit + journal + report, copies the report
+artifacts to -o OUTDIR and prints the parsed summary.  Pitfall list
+and observed error strings: references/quick-ref-tester-automation.md.
 """
 
 import argparse
+import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -617,6 +639,761 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Tester automation — terminal64.exe /portable /config:<INI>
+#
+# Pitfall list this code encodes (details + error strings:
+# references/quick-ref-tester-automation.md):
+#   1. [Tester] Report=<name> writes <name>.htm(l) + PNGs into the
+#      TERMINAL WORKING DIRECTORY (install root for /portable), not
+#      the process CWD / MQL5\Files / the INI's dir.
+#   2. /config:<path> must be a Windows-style ABSOLUTE path and
+#      SPACE-FREE — a quoted path with spaces makes the terminal log
+#      `cannot load config "..."` and boot as a plain GUI.
+#   3. Single-instance lock: run against a dedicated cloned instance
+#      (needs Bases\ + MQL5\; temp/logs/agent caches excludable).
+#   4. UseLocal=1 is REQUIRED or no local agent spawns and the run
+#      silently never starts.
+#   5. Every [TesterInputs] line must be name=value||start||step||stop||Y|N;
+#      omitted inputs silently fall back to EA source defaults.
+#   6. Launch detached; completion = process exit + journal
+#      `last test passed` + report file present. Poll, never sleep.
+#   7. Journal logs\YYYYMMDD.log is UTF-16LE — decode before parsing.
+#   8. INI written with CRLF defensively.
+# ---------------------------------------------------------------------------
+
+_TESTER_REQUIRED_KEYS = ("Expert", "Symbol", "Period", "FromDate", "ToDate")
+
+MODEL_ENUM = {
+    "0": "every tick (generated)",
+    "1": "1-minute OHLC",
+    "2": "open prices only",
+    "3": "math calculations",
+    "4": "every tick based on real ticks (falls back to generated ticks "
+         "when the broker history has none)",
+}
+
+# Artifact suffixes MT5 writes next to the report .htm(l) (pitfall #1).
+_REPORT_PNG_SUFFIXES = (".png", "-hst.png", "-mfemae.png", "-holding.png")
+
+
+def _posix_to_win(path: Path) -> str:
+    """Convert a POSIX path to a Windows path for MT5 CLI flags.
+
+    Strategy 1: if *path* lives under a ``<prefix>/drive_X`` directory,
+    map it to ``X:\\...`` (deterministic, no wine call).
+    Strategy 2 (fallback): ask ``winepath -w``.
+    The result must be absolute and SPACE-FREE for /config: (pitfall #2).
+    """
+    path = path.resolve()
+    for parent in (path, *path.parents):
+        m = re.fullmatch(r"drive_([A-Za-z])", parent.name)
+        if m:
+            rel = path.relative_to(parent)
+            return f"{m.group(1).upper()}:\\{rel.as_posix().replace('/', chr(92))}"
+    try:
+        r = subprocess.run(
+            ["winepath", "-w", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip().splitlines()[0]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return str(path)  # last resort; caller validates
+
+
+def _default_stage_dir() -> Optional[Path]:
+    """Wine drive root derived from MT5_BASE (…/drive_c/… → drive_c).
+
+    Matches the proven recipe: stage the INI at the drive root, e.g.
+    ``C:/mts4.ini``.  Returns None if MT5_BASE is not under a drive_X.
+    """
+    for parent in (MT5_BASE, *MT5_BASE.parents):
+        if re.fullmatch(r"drive_[A-Za-z]", parent.name):
+            return parent
+    return None
+
+
+def _parse_ini_sections(text: str) -> dict[str, dict[str, str]]:
+    """Parse INI text into {section: {key: value}} (comments skipped)."""
+    sections: dict[str, dict[str, str]] = {}
+    cur: Optional[dict[str, str]] = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(";") or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            cur = sections.setdefault(line[1:-1].strip(), {})
+            continue
+        if cur is None or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        cur[k.strip()] = v.strip()
+    return sections
+
+
+def _validate_tester_inputs_lines(lines: list[str]) -> list[str]:
+    """Return error strings for malformed [TesterInputs] lines (pitfall #5)."""
+    errors: list[str] = []
+    in_inputs = False
+    for i, raw in enumerate(lines, 1):
+        s = raw.strip()
+        if s.lower().startswith("[testerinputs]"):
+            in_inputs = True
+            continue
+        if s.startswith("["):
+            in_inputs = False
+            continue
+        if not in_inputs or not s or s.startswith(";"):
+            continue
+        parts = s.split("||")
+        if len(parts) != 5 or parts[4].strip().upper() not in ("Y", "N"):
+            errors.append(
+                f"  [TesterInputs] line {i}: {s!r} — must be "
+                f"name=value||start||step||stop||Y|N"
+            )
+    return errors
+
+
+def _resolve_expert_host(expert_value: str) -> Optional[Path]:
+    """Resolve [Tester] Expert= to an existing .ex5 under host MQL5/Experts."""
+    rel = expert_value.replace("\\", "/").lstrip("/")
+    p = MQL5_DIR / "Experts" / rel
+    if p.is_file():
+        return p
+    experts = MQL5_DIR / "Experts"
+    if experts.is_dir():
+        hits = sorted(experts.rglob(Path(rel).name))
+        if hits:
+            return hits[0]
+    return None
+
+
+def _validate_tester_ini(
+    ini_path: Path, sections: dict[str, dict[str, str]]
+) -> tuple[list[str], list[str]]:
+    """Validate a tester INI. Returns (errors, warnings)."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    tester = sections.get("Tester")
+    if tester is None:
+        return (["  no [Tester] section found"], warnings)
+    for key in _TESTER_REQUIRED_KEYS:
+        if not tester.get(key):
+            errors.append(f"  [Tester] missing required key: {key}")
+    if tester.get("UseLocal") == "0":
+        errors.append(
+            "  [Tester] UseLocal=0 — no local agent will spawn and the run "
+            "silently never starts; set UseLocal=1"
+        )
+    elif "UseLocal" not in tester:
+        warnings.append("  [Tester] UseLocal missing — will be set to 1 in the staged copy")
+    model = tester.get("Model", "")
+    if model and model not in MODEL_ENUM:
+        errors.append(
+            f"  [Tester] Model={model} invalid (expected 0-4: "
+            + "; ".join(f"{k}={v}" for k, v in MODEL_ENUM.items()) + ")"
+        )
+    elif model == "4":
+        warnings.append(
+            "  Model=4 — every tick based on real ticks; falls back to generated "
+            "ticks when the broker history has none (report's 'History Quality: "
+            "0% real ticks' is the tell)"
+        )
+    expert = tester.get("Expert", "")
+    if expert:
+        host_ex5 = _resolve_expert_host(expert)
+        if host_ex5 is None:
+            errors.append(
+                f"  [Tester] Expert={expert!r} — no such .ex5 under "
+                f"{MQL5_DIR / 'Experts'} (deploy first: mql5_helper.py deploy)"
+            )
+    errors.extend(_validate_tester_inputs_lines(ini_path.read_text(
+        encoding="utf-8-sig", errors="replace").splitlines()))
+    return (errors, warnings)
+
+
+def _normalize_tester_ini_text(
+    lines: list[str], report_name: str
+) -> list[str]:
+    """Return normalized INI lines: forced keys + Report= (pitfall #4/#6/#8).
+
+    Forces UseLocal=1, ReplaceReport=1, ShutdownTerminal=1 and
+    Report=<report_name> in [Tester]; everything else is kept verbatim.
+    Caller converts to CRLF.
+    """
+    forced = {
+        "UseLocal": "1",
+        "ReplaceReport": "1",
+        "ShutdownTerminal": "1",
+        "Report": report_name,
+    }
+    seen: set[str] = set()
+    out: list[str] = []
+    insert_at: Optional[int] = None  # index AFTER the last [Tester] line
+    in_tester = False
+    for raw in lines:
+        s = raw.strip()
+        if s.lower() == "[tester]":
+            in_tester = True
+        elif s.startswith("["):
+            in_tester = False
+        if in_tester and "=" in s and not s.startswith(";"):
+            key = s.partition("=")[0].strip()
+            if key in forced:
+                if key not in seen:
+                    seen.add(key)
+                    out.append(f"{key}={forced[key]}")
+                insert_at = len(out)
+                continue
+        out.append(raw.rstrip("\r\n"))
+        if in_tester:
+            insert_at = len(out)
+    # Insert forced keys that were missing entirely (right after [Tester])
+    missing = [k for k in forced if k not in seen]
+    if missing:
+        if insert_at is None:
+            out.append("[Tester]")
+            insert_at = len(out)
+        for k in missing:
+            out.insert(insert_at, f"{k}={forced[k]}")
+            insert_at += 1
+    return out
+
+
+def _clone_ignore(directory, names):
+    """shutil.copytree ignore fn: skip temp/logs and Tester agent caches."""
+    d = Path(directory)
+    ignored: set[str] = set()
+    if d == MT5_BASE:
+        ignored |= {"temp", "logs"}
+    if d.name == "Tester":
+        ignored |= {
+            n for n in names
+            if n.startswith("Agent-") or n.lower() in ("cache", "logs")
+        }
+    return ignored
+
+
+def _ensure_instance(instance: Path) -> None:
+    """Bootstrap a runner instance by cloning MT5_BASE (pitfall #3)."""
+    if (instance / "terminal64.exe").is_file():
+        return
+    print(f"Runner instance not found: {instance}")
+    print(f"Cloning {MT5_BASE} → {instance}")
+    print("  (Bases\\ can be several GB; temp/logs/Tester agent caches excluded)")
+    shutil.copytree(MT5_BASE, instance, ignore=_clone_ignore, dirs_exist_ok=True)
+    print("  clone done")
+
+
+def _read_maybe_utf16(path: Path) -> str:
+    """Read a log file, decoding UTF-16LE when BOM/NUL pattern present."""
+    return _read_journal_since(path, 0)
+
+
+def _read_journal_since(path: Path, byte_offset: int = 0) -> str:
+    """Read a journal from *byte_offset*, returning text appended after it.
+
+    UTF-16LE stores 2 bytes per character, so the byte offset is divided
+    by 2 to get the character offset before slicing.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return ""
+    if raw[:2] == b"\xff\xfe" or b"\x00" in raw[: min(len(raw), 1024)]:
+        text = raw.decode("utf-16-le", errors="replace")
+        return text[byte_offset // 2:]
+    text = raw.decode("utf-8", errors="replace")
+    return text[byte_offset:]
+
+
+def _newest_journal(instance: Path, since: float) -> Optional[Path]:
+    """Newest instance/logs/*.log modified after *since* (epoch sec)."""
+    logs = instance / "logs"
+    if not logs.is_dir():
+        return None
+    hits = [p for p in logs.glob("*.log") if p.stat().st_mtime >= since - 5]
+    return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
+
+
+def _journal_key_lines(text: str) -> list[str]:
+    """Extract the decision-relevant journal lines (pitfall #7)."""
+    markers = (
+        "automatic testing started",
+        "last test passed",
+        "cannot load config",
+        "exit with code",
+        "no history",
+        "tester agent",
+    )
+    return [
+        ln.strip()
+        for ln in text.splitlines()
+        if any(m in ln for m in markers)
+    ]
+
+
+def _locate_report(instance: Path, report_name: str, since: float) -> Optional[Path]:
+    """Find the report .htm(l) in the terminal working dir (pitfall #1).
+
+    Prefers a stem matching Report=<name>, else any ReportTester-*.html;
+    both only among files newer than the launch.  Evidence: an INI with
+    Report=OneShotEA-s4-verify still produced ReportTester-<login>.html,
+    so the fallback matters.
+    """
+    def _newer(p: Path) -> bool:
+        try:
+            return p.stat().st_mtime >= since - 5
+        except OSError:
+            return False
+
+    cands = [p for p in instance.glob("*.htm*") if _newer(p)]
+    named = [p for p in cands if p.stem == report_name or p.stem.startswith(report_name)]
+    pool = named or [
+        p for p in cands if re.match(r"ReportTester-", p.stem, re.IGNORECASE)
+    ] or cands
+    return max(pool, key=lambda p: p.stat().st_mtime) if pool else None
+
+
+def _kill_tree(popen: subprocess.Popen) -> None:
+    """Terminate the detached terminal process group (POSIX: killpg)."""
+    if IS_WINDOWS:
+        popen.terminate()
+        return
+    try:
+        os.killpg(os.getpgid(popen.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    time.sleep(3)
+    try:
+        os.killpg(os.getpgid(popen.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def cmd_backtest(args: argparse.Namespace) -> int:
+    """Headless single test: validate → stage → launch → poll → collect."""
+    ini = Path(args.ini).resolve()
+    if not ini.is_file():
+        print(f"Error: INI not found: {ini}")
+        return 1
+    text = ini.read_text(encoding="utf-8-sig", errors="replace")
+    sections = _parse_ini_sections(text)
+    errors, warnings = _validate_tester_ini(ini, sections)
+    for w in warnings:
+        print(f"Warn:{w}")
+    if errors:
+        print("Error: INI validation failed:")
+        print("\n".join(errors))
+        return 1
+
+    tester = sections["Tester"]
+    expert_rel = tester["Expert"].replace("\\", "/")
+    host_ex5 = _resolve_expert_host(tester["Expert"])
+    assert host_ex5 is not None  # validated above
+    ea_stem = Path(expert_rel).stem
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    report_name = args.report_name or f"{ea_stem}-{ts}"
+
+    # --- runner instance (pitfall #3) ------------------------------------
+    instance = (
+        Path(args.instance).resolve() if args.instance
+        else MT5_BASE.parent / "MetaTrader 5-auto"
+    )
+    terminal = instance / "terminal64.exe"
+    if not IS_WINDOWS:
+        if not shutil.which(args.wine):
+            print(f"Error: wine binary not found: {args.wine}")
+            return 1
+    if not terminal.is_file() and args.dry_run:
+        print(
+            f"Dry run — instance {instance} missing; would be cloned from "
+            f"{MT5_BASE} (skipped in dry run)."
+        )
+    else:
+        _ensure_instance(instance)
+        if not terminal.is_file():
+            print(f"Error: terminal64.exe not found in instance: {terminal}")
+            return 1
+
+    # --- refresh the freshly-compiled .ex5 into the instance --------------
+    if args.no_refresh:
+        print("Skipping .ex5 refresh (--no-refresh)")
+    elif args.dry_run and not terminal.is_file():
+        print("Dry run — .ex5 refresh skipped (instance not bootstrapped)")
+    else:
+        inst_ex5 = instance / "MQL5" / "Experts" / expert_rel
+        inst_ex5.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(host_ex5, inst_ex5)
+        print(f"Refreshed .ex5: {host_ex5.name} → {inst_ex5}")
+
+    # --- stage the normalized INI at a space-free Windows path -----------
+    stage_dir = Path(args.stage_dir).resolve() if args.stage_dir else _default_stage_dir()
+    if stage_dir is None:
+        print(
+            "Error: cannot derive a stage directory (MT5_BASE is not under a "
+            "Wine drive_X). Pass --stage-dir DIR pointing inside the Wine "
+            "C: drive, e.g. <prefix>/drive_c/tmp"
+        )
+        return 1
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    staged = stage_dir / f"backtest-{ea_stem}-{ts}.ini"
+    norm_lines = _normalize_tester_ini_text(
+        text.splitlines(), report_name
+    )
+    staged.write_bytes(("\r\n".join(norm_lines) + "\r\n").encode("utf-8"))
+    win_cfg = _posix_to_win(staged)
+    if " " in win_cfg:
+        print(
+            f"Error: staged config path contains spaces: {win_cfg}\n"
+            "  MT5 cannot load a /config: path with spaces even when quoted "
+            "(pitfall #2). Re-run with --stage-dir pointing at a space-free "
+            "location inside a Wine drive, e.g. <prefix>/drive_c"
+        )
+        return 1
+    print(f"Staged INI: {staged}  (as {win_cfg})")
+
+    # --- launch command ---------------------------------------------------
+    if IS_WINDOWS:
+        cmd = [str(terminal), "/portable", f"/config:{win_cfg}"]
+    else:
+        cmd = [args.wine, str(terminal), "/portable", f"/config:{win_cfg}"]
+    print(f"Launch: {' '.join(cmd)}")
+    print(f"Working dir (report lands here, pitfall #1): {instance}")
+    if args.dry_run:
+        print("Dry run — stopping before launch.")
+        return 0
+
+    # --- launch detached (pitfall #6) -------------------------------------
+    t_launch = time.time()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(instance),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=not IS_WINDOWS,
+        )
+    except OSError as e:
+        print(f"Error: launch failed: {e}")
+        return 1
+    print(f"Launched pid={proc.pid}; polling (timeout {args.timeout}s) …")
+
+    status = "timeout"
+    seen_events: set[str] = set()
+    journal_path: Optional[Path] = None
+    # Journal baseline: logs/YYYYMMDD.log is CUMULATIVE for the day, so a
+    # naive full-file grep sees this morning's stale `cannot load config`
+    # lines and aborts a healthy launch. Only content appended after the
+    # launch (bytes past the baseline offset, or a newly-created file)
+    # counts as evidence.
+    base_jp = _newest_journal(instance, t_launch - 86400)
+    base_jp_name = base_jp.name if base_jp else None
+    base_offset = base_jp.stat().st_size if base_jp else 0
+    try:
+        deadline = t_launch + args.timeout
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                status = "exited"
+                break
+            time.sleep(2)
+            jp = _newest_journal(instance, t_launch)
+            if jp is not None:
+                jtext = _read_journal_since(jp, base_offset if jp.name == base_jp_name else 0)
+                if "cannot load config" in jtext and "config-load-error" not in seen_events:
+                    seen_events.add("config-load-error")
+                    print("FAIL: journal reports 'cannot load config' — aborting (pitfall #2)")
+                    _kill_tree(proc)
+                    status = "config-load-error"
+                    journal_path = jp
+                    break
+                if "automatic testing started" in jtext and "started" not in seen_events:
+                    seen_events.add("started")
+                    print("Journal: automatic testing started")
+                journal_path = jp
+        else:
+            print(f"Timeout after {args.timeout}s — killing terminal")
+            _kill_tree(proc)
+    except KeyboardInterrupt:
+        print("\nInterrupted — killing terminal")
+        _kill_tree(proc)
+        return 130
+
+    # --- post-mortem: journal + report ------------------------------------
+    time.sleep(1.5)
+    if journal_path is None:
+        journal_path = _newest_journal(instance, t_launch)
+    key_lines: list[str] = []
+    if journal_path is not None:
+        jtext = _read_journal_since(
+            journal_path, base_offset if journal_path.name == base_jp_name else 0
+        )
+        key_lines = _journal_key_lines(jtext)
+        print(f"\nJournal: {journal_path}")
+        for ln in key_lines:
+            print(f"  {ln}")
+    else:
+        print(f"\nWarn: no journal found under {instance / 'logs'}")
+
+    passed = "last test passed" in "\n".join(key_lines)
+    report = _locate_report(instance, report_name, t_launch)
+
+    outdir = (
+        Path(args.out).resolve() if args.out
+        else Path.cwd() / f"tester-report-{ea_stem}-{ts}"
+    )
+    artifacts: list[str] = []
+    if report is not None:
+        outdir.mkdir(parents=True, exist_ok=True)
+        to_copy = [report] + [
+            p for suf in _REPORT_PNG_SUFFIXES
+            for p in [instance / f"{report.stem}{suf}"] if p.is_file()
+        ]
+        for p in to_copy:
+            dest = outdir / p.name
+            shutil.copy2(p, dest)
+            artifacts.append(str(dest))
+        print(f"\nReport: {report.name} → {outdir}")
+    elif status == "exited":
+        print(
+            f"\nError: no report found in {instance} newer than launch "
+            f"(pitfall #1 — Report= lands in the terminal working dir)"
+        )
+
+    if args.json:
+        print(json.dumps({
+            "status": status,
+            "passed": passed,
+            "ea": expert_rel,
+            "instance": str(instance),
+            "staged_ini": str(staged),
+            "journal": str(journal_path) if journal_path else None,
+            "journal_key_lines": key_lines,
+            "report": str(report) if report else None,
+            "outdir": str(outdir) if artifacts else None,
+            "artifacts": artifacts,
+            "elapsed_s": round(time.time() - t_launch, 1),
+        }, indent=2))
+    elif passed and artifacts:
+        # Parsed summary via parse_tester_report.py (same interpreter)
+        parser = Path(__file__).with_name("parse_tester_report.py")
+        try:
+            r = subprocess.run(
+                [sys.executable, str(parser), "report", str(outdir / report.name)],
+                timeout=120,
+            )
+            if r.returncode != 0:
+                print(
+                    "\nWarn: summary parser failed — open the report manually: "
+                    f"{outdir / report.name}"
+                )
+        except (OSError, subprocess.TimeoutExpired):
+            print(f"\nNote: parse the report with: parse_tester_report.py {outdir / report.name}")
+
+    if status != "exited":
+        return 2
+    if not passed:
+        return 1
+    if report is None:
+        return 1
+    print("\nBacktest OK.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# init-ini — generate a [Tester]/[TesterInputs] skeleton from .mq5 inputs
+# ---------------------------------------------------------------------------
+
+_INPUT_RE = re.compile(
+    r"^\s*(s?input)\s+([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*=\s*(.*)$"
+)
+_GROUP_RE = re.compile(r'^\s*input\s+group\s+(.+?)\s*$')
+
+_INT_TYPES = {"int", "uint", "long", "ulong", "short", "ushort", "char", "uchar"}
+
+
+def _cut_value(rest: str) -> tuple[str, str]:
+    """Split ``value; // comment`` respecting quotes. Returns (value, comment)."""
+    q: Optional[str] = None
+    end: Optional[int] = None
+    i = 0
+    while i < len(rest):
+        ch = rest[i]
+        if q:
+            if ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+        elif ch == ";":
+            end = i
+            break
+        elif ch == "/" and rest[i:i + 2] == "//":
+            end = i
+            break
+        i += 1
+    if end is None:
+        value, tail = rest, ""
+    else:
+        value, tail = rest[:end], rest[end:]
+    cmt = ""
+    idx = tail.find("//")
+    if idx >= 0:
+        cmt = tail[idx + 2:].strip()
+    return value.strip(), cmt
+
+
+def _ini_value_step(typ: str, value: str) -> tuple[str, str, bool]:
+    """Return (ini_value, step, needs_manual_check) for an input default.
+
+    Step convention (SKILL.md §6 / pitfall #5): booleans and enums use
+    step=0 (only start/stop matter); doubles 0.1; ints 1. Enum/color
+    identifiers can't be resolved from source — kept verbatim + flagged.
+    """
+    v = value.strip()
+    m = re.fullmatch(r"[Dd]'([^']*)'", v)
+    if m:
+        # D'yyyy.mm.dd' → MT5 INI expects the plain date text
+        return m.group(1), "0", False
+    t = typ.lower()
+    if t == "bool":
+        return v.lower(), "0", False
+    if t == "string":
+        return v.strip('"'), "0", False
+    if t in ("double", "float"):
+        return v, "0.1", not re.fullmatch(r"-?\d+(\.\d+)?", v)
+    if t in _INT_TYPES:
+        return v, "1", not re.fullmatch(r"-?\d+", v)
+    # enum / color / datetime / other identifiers
+    return v, "0", not re.fullmatch(r"-?\d+", v)
+
+
+def _scan_mq5_inputs(src: Path) -> list[dict]:
+    """Extract every input/sinput declaration from an .mq5 source."""
+    try:
+        text = src.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"Error: cannot read {src}: {e}")
+        sys.exit(1)
+    inputs: list[dict] = []
+    group: Optional[str] = None
+    for ln, raw in enumerate(text.splitlines(), 1):
+        g = _GROUP_RE.match(raw)
+        if g:
+            group = g.group(1).strip().strip('"')
+            continue
+        m = _INPUT_RE.match(raw)
+        if not m:
+            continue
+        kw, typ, name, rest = m.groups()
+        value, comment = _cut_value(rest)
+        ini_value, step, todo = _ini_value_step(typ, value)
+        inputs.append({
+            "name": name,
+            "type": typ,
+            "value": ini_value,
+            "step": step,
+            "comment": comment,
+            "group": group,
+            "sinput": kw == "sinput",
+            "todo": todo,
+            "line": ln,
+        })
+    return inputs
+
+
+def cmd_init_ini(args: argparse.Namespace) -> int:
+    """Generate a Tester INI skeleton listing ALL inputs of an .mq5."""
+    src = Path(args.file).resolve()
+    if not src.is_file():
+        print(f"Error: {src} not found")
+        return 1
+    inputs = _scan_mq5_inputs(src)
+    if not inputs:
+        print(f"Error: no input declarations found in {src.name}")
+        return 1
+
+    if args.json:
+        print(json.dumps(inputs, indent=2))
+        return 0
+
+    ea_stem = src.stem
+    today = date.today()
+    date_from = args.date_from or (today - timedelta(days=730)).strftime("%Y.%m.%d")
+    date_to = args.date_to or today.strftime("%Y.%m.%d")
+    report = args.report or f"{ea_stem}"
+    expert = args.expert or f"{ea_stem}.ex5"
+
+    out = Path(args.out).resolve() if args.out else src.with_suffix(".ini")
+    if out.exists() and not args.force:
+        print(f"Error: output exists: {out} (use --force to overwrite)")
+        return 1
+
+    lines = [
+        f"; Generated by mql5_helper.py init-ini from {src.name} "
+        f"at {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "; Every input is listed as name=value||start||step||stop||Y|N —",
+        "; inputs OMITTED from [TesterInputs] silently fall back to EA source",
+        "; defaults (GIGO trap). To optimize a parameter: set start/step/stop",
+        "; and flip the trailing N → Y.",
+        "",
+        "[Tester]",
+        f"Expert={expert}",
+        f"Symbol={args.symbol}",
+        f"Period={args.period}",
+        "Optimization=0",
+        f"Model={args.model}",
+        f"FromDate={date_from}",
+        f"ToDate={date_to}",
+        "ForwardMode=0",
+        f"Deposit={args.deposit}",
+        f"Currency={args.currency}",
+        "ProfitInPips=0",
+        f"Leverage={args.leverage}",
+        "ExecutionMode=500",
+        "OptimizationCriterion=1",
+        f"Report={report}",
+        "ReplaceReport=1",
+        "UseLocal=1",
+        "ShutdownTerminal=1",
+        "",
+        "[TesterInputs]",
+    ]
+    cur_group: Optional[str] = None
+    todos = 0
+    for inp in inputs:
+        if inp["group"] != cur_group:
+            cur_group = inp["group"]
+            if cur_group:
+                lines.append(f"; --- {cur_group} ---")
+        if inp["comment"]:
+            lines.append(f"; {inp['comment']}")
+        val, step = inp["value"], inp["step"]
+        lines.append(
+            f"{inp['name']}={val}||{val}||{step}||{val}||N"
+        )
+        if inp["todo"]:
+            todos += 1
+            lines.append(
+                f"; TODO: {inp['name']} ({inp['type']}) — value {val!r} is an "
+                "identifier; replace with the numeric enum/datetime value"
+            )
+        if inp["sinput"]:
+            lines.append(f"; note: {inp['name']} is sinput — never optimizable")
+    out.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-8"))
+
+    print(f"Inputs parsed: {len(inputs)}  →  {out}")
+    if todos:
+        print(
+            f"Warn: {todos} value(s) are enum/datetime identifiers — replace "
+            "them with numeric values before running (see TODO comments)"
+        )
+    print("Next: review Symbol/Period/dates, then run: mql5_helper.py backtest " + str(out))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -653,6 +1430,53 @@ def main(argv: Optional[list[str]] = None) -> int:
     deploy_p = sub.add_parser("deploy", help="Compile .mq5 then deploy .ex5 to MQL5 tree")
     deploy_p.add_argument("file", help="Path to .mq5 file")
 
+    init_p = sub.add_parser(
+        "init-ini",
+        help="Generate a [Tester]/[TesterInputs] INI skeleton from .mq5 inputs",
+    )
+    init_p.add_argument("file", help="Path to .mq5 source")
+    init_p.add_argument("-o", "--out", metavar="FILE", help="Output .ini (default: <source>.ini)")
+    init_p.add_argument("--expert", help="[Tester] Expert= value (default: <stem>.ex5)")
+    init_p.add_argument("--symbol", default="XAUUSD")
+    init_p.add_argument("--period", default="M15")
+    init_p.add_argument("--from", dest="date_from", metavar="YYYY.MM.DD",
+                        help="FromDate (default: today-2y)")
+    init_p.add_argument("--to", dest="date_to", metavar="YYYY.MM.DD",
+                        help="ToDate (default: today)")
+    init_p.add_argument("--model", default="4", help="0-4 (default 4 = real ticks)")
+    init_p.add_argument("--deposit", default="10000")
+    init_p.add_argument("--currency", default="USD")
+    init_p.add_argument("--leverage", default="100")
+    init_p.add_argument("--report", help="[Tester] Report= base name (default: <stem>)")
+    init_p.add_argument("--force", action="store_true", help="Overwrite existing output")
+    init_p.add_argument("--json", action="store_true", help="Print parsed inputs as JSON, no INI")
+
+    bt = sub.add_parser(
+        "backtest",
+        help="Headless single test: terminal64.exe /portable /config:<INI>",
+    )
+    bt.add_argument("ini", help="Tester config .ini (format: references/quick-ref-tester-automation.md)")
+    bt.add_argument("--instance", metavar="DIR",
+                    help="Runner clone dir (default: <MT5_BASE parent>/MetaTrader 5-auto; "
+                         "bootstrapped by cloning MT5_BASE if missing)")
+    bt.add_argument("--no-refresh", action="store_true",
+                    help="Skip copying the EA .ex5 from host MQL5 into the instance")
+    bt.add_argument("--stage-dir", metavar="DIR",
+                    help="Dir to stage the normalized INI (default: Wine drive root derived "
+                         "from MT5_BASE, e.g. drive_c → C:\\). Must yield a SPACE-FREE "
+                         "Windows path (pitfall #2)")
+    bt.add_argument("-o", "--out", metavar="DIR",
+                    help="Dir to receive the report .html + PNGs "
+                         "(default: ./tester-report-<EA>-<ts>)")
+    bt.add_argument("--report-name", help="Override [Tester] Report= base name")
+    bt.add_argument("--timeout", type=int, default=3600, help="Seconds (default 3600)")
+    bt.add_argument("--wine", default="wine", help="Wine binary (Unix only)")
+    bt.add_argument("--dry-run", action="store_true",
+                    help="Validate, stage, prepare, print launch command; do NOT launch")
+    bt.add_argument("--json", action="store_true", help="Emit result as JSON")
+    bt.add_argument("--no-summary", action="store_true",
+                    help="Skip the parse_tester_report.py summary print")
+
     args = parser.parse_args(argv)
 
     # Resolve paths (.env loading + auto-detection) before any command runs
@@ -668,6 +1492,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "compile": cmd_compile,
         "check": cmd_check,
         "deploy": cmd_deploy,
+        "init-ini": cmd_init_ini,
+        "backtest": cmd_backtest,
     }
     return commands[args.command](args)
 
