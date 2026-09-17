@@ -2,7 +2,7 @@
 """
 MQL5 development helper: compile, check, deploy, list, status,
 init-ini (generate a Tester INI skeleton from .mq5 inputs),
-backtest (headless single test via terminal64.exe /portable /config:).
+tester (headless single test or Grid optimization via an INI file).
 
 Supports Windows 10+ natively (PowerShell) and Linux/Wine.
 
@@ -19,7 +19,7 @@ Usage:
     python skills/mql5/scripts/mql5_helper.py status
     python skills/mql5/scripts/mql5_helper.py list
     python skills/mql5/scripts/mql5_helper.py init-ini FILE.mq5 [OPTS]
-    python skills/mql5/scripts/mql5_helper.py backtest INI [OPTS]
+    python skills/mql5/scripts/mql5_helper.py tester INI [OPTS]
 
 deploy compiles the .mq5 first, then copies the resulting .ex5 into
 the correct MQL5 sub-directory (Experts / Indicators / Scripts /
@@ -31,8 +31,9 @@ line is ``name=default||start||step||stop||Y|N`` — inputs omitted
 from [TesterInputs] silently fall back to EA source defaults, so the
 skeleton lists ALL of them.
 
-backtest runs a single Strategy Tester test headlessly: it validates
-and normalizes the INI, stages it at a space-free Windows path,
+tester runs a Strategy Tester single test or optimization headlessly
+(Optimization=0: single; 1: complete Grid; 2: genetic; 3: Market Watch).
+It validates and normalizes the INI, stages it at a space-free Windows path,
 launches the terminal against a dedicated runner instance (cloned
 from MT5_BASE on first use, so the user's GUI terminal is not
 disturbed), polls process exit + journal + report, copies the report
@@ -656,7 +657,8 @@ def cmd_list(args: argparse.Namespace) -> int:
 #   5. Every [TesterInputs] line must be name=value||start||step||stop||Y|N;
 #      omitted inputs silently fall back to EA source defaults.
 #   6. Launch detached; completion = process exit + journal
-#      `last test passed` + report file present. Poll, never sleep.
+#      successful test/optimization journal + report file present.
+#      Optimization writes XML rather than HTML + PNGs. Poll, never sleep.
 #   7. Journal logs\YYYYMMDD.log is UTF-16LE — decode before parsing.
 #   8. INI written with CRLF defensively.
 # ---------------------------------------------------------------------------
@@ -667,9 +669,15 @@ MODEL_ENUM = {
     "0": "every tick (generated)",
     "1": "1-minute OHLC",
     "2": "open prices only",
-    "3": "math calculations",
     "4": "every tick based on real ticks (falls back to generated ticks "
          "when the broker history has none)",
+}
+
+OPTIMIZATION_ENUM = {
+    "0": "disabled (single test)",
+    "1": "slow complete algorithm (Grid / exhaustive parameter combinations)",
+    "2": "fast genetic algorithm",
+    "3": "all symbols selected in Market Watch",
 }
 
 # Artifact suffixes MT5 writes next to the report .htm(l) (pitfall #1).
@@ -788,10 +796,10 @@ def _validate_tester_ini(
         )
     elif "UseLocal" not in tester:
         warnings.append("  [Tester] UseLocal missing — will be set to 1 in the staged copy")
-    model = tester.get("Model", "")
-    if model and model not in MODEL_ENUM:
+    model = tester.get("Model", "0")
+    if model not in MODEL_ENUM:
         errors.append(
-            f"  [Tester] Model={model} invalid (expected 0-4: "
+            f"  [Tester] Model={model} unsupported (expected 0, 1, 2, 4: "
             + "; ".join(f"{k}={v}" for k, v in MODEL_ENUM.items()) + ")"
         )
     elif model == "4":
@@ -799,6 +807,12 @@ def _validate_tester_ini(
             "  Model=4 — every tick based on real ticks; falls back to generated "
             "ticks when the broker history has none (report's 'History Quality: "
             "0% real ticks' is the tell)"
+        )
+    optimization = tester.get("Optimization", "0")
+    if optimization not in OPTIMIZATION_ENUM:
+        errors.append(
+            f"  [Tester] Optimization={optimization} invalid (expected 0-3: "
+            + "; ".join(f"{k}={v}" for k, v in OPTIMIZATION_ENUM.items()) + ")"
         )
     expert = tester.get("Expert", "")
     if expert:
@@ -819,7 +833,8 @@ def _normalize_tester_ini_text(
     """Return normalized INI lines: forced keys + Report= (pitfall #4/#6/#8).
 
     Forces UseLocal=1, ReplaceReport=1, ShutdownTerminal=1 and
-    Report=<report_name> in [Tester]; everything else is kept verbatim.
+    Report=<report_name> in [Tester]. Missing Model/Optimization default
+    to 0; explicit values and all other settings are kept verbatim.
     Caller converts to CRLF.
     """
     forced = {
@@ -828,6 +843,8 @@ def _normalize_tester_ini_text(
         "ShutdownTerminal": "1",
         "Report": report_name,
     }
+    defaults = {"Optimization": "0", "Model": "0"}
+    present: set[str] = set()
     seen: set[str] = set()
     out: list[str] = []
     insert_at: Optional[int] = None  # index AFTER the last [Tester] line
@@ -840,6 +857,7 @@ def _normalize_tester_ini_text(
             in_tester = False
         if in_tester and "=" in s and not s.startswith(";"):
             key = s.partition("=")[0].strip()
+            present.add(key)
             if key in forced:
                 if key not in seen:
                     seen.add(key)
@@ -849,6 +867,8 @@ def _normalize_tester_ini_text(
         out.append(raw.rstrip("\r\n"))
         if in_tester:
             insert_at = len(out)
+    # Avoid inheriting a previous runner's optimization/model.
+    forced.update({k: v for k, v in defaults.items() if k not in present})
     # Insert forced keys that were missing entirely (right after [Tester])
     missing = [k for k in forced if k not in seen]
     if missing:
@@ -867,7 +887,7 @@ def _clone_ignore(directory, names):
     ignored: set[str] = set()
     if d == MT5_BASE:
         ignored |= {"temp", "logs"}
-    if d.name == "Tester":
+    if d.name.lower() == "tester":
         ignored |= {
             n for n in names
             if n.startswith("Agent-") or n.lower() in ("cache", "logs")
@@ -922,6 +942,14 @@ def _journal_key_lines(text: str) -> list[str]:
     markers = (
         "automatic testing started",
         "last test passed",
+        "automatic optimization started",
+        "complete optimization started",
+        "genetic optimization started",
+        "optimization finished",
+        "optimization done",
+        "optimization stopped",
+        "optimization cancelled",
+        "new records saved to cache",
         "cannot load config",
         "exit with code",
         "no history",
@@ -934,25 +962,28 @@ def _journal_key_lines(text: str) -> list[str]:
     ]
 
 
-def _locate_report(instance: Path, report_name: str, since: float) -> Optional[Path]:
-    """Find the report .htm(l) in the terminal working dir (pitfall #1).
+def _locate_report(
+    instance: Path, report_name: str, since: float, *, optimization: bool = False
+) -> Optional[Path]:
+    """Find HTML (single test) or XML (optimization) in the instance root.
 
-    Prefers a stem matching Report=<name>, else any ReportTester-*.html;
-    both only among files newer than the launch.  Evidence: an INI with
-    Report=OneShotEA-s4-verify still produced ReportTester-<login>.html,
-    so the fallback matters.
+    Prefer the Report= stem, then MT5's ReportTester-/ReportOptimizer-
+    fallback; never collect an unrelated file or a forward report.
     """
     def _newer(p: Path) -> bool:
         try:
-            return p.stat().st_mtime >= since - 5
+            return p.stat().st_mtime >= since
         except OSError:
             return False
 
-    cands = [p for p in instance.glob("*.htm*") if _newer(p)]
-    named = [p for p in cands if p.stem == report_name or p.stem.startswith(report_name)]
-    pool = named or [
-        p for p in cands if re.match(r"ReportTester-", p.stem, re.IGNORECASE)
-    ] or cands
+    suffixes = {".xml"} if optimization else {".htm", ".html"}
+    stem = re.sub(r"\.(?:xml|html?)$", "", report_name, flags=re.IGNORECASE)
+    cands = [p for p in instance.iterdir()
+             if p.is_file() and p.suffix.lower() in suffixes and _newer(p)]
+    named = [p for p in cands if p.stem == stem]
+    prefix = "ReportOptimizer-" if optimization else "ReportTester-"
+    pool = named or [p for p in cands if p.stem.lower().startswith(prefix.lower())
+                     and not p.stem.lower().endswith('.forward')]
     return max(pool, key=lambda p: p.stat().st_mtime) if pool else None
 
 
@@ -972,8 +1003,8 @@ def _kill_tree(popen: subprocess.Popen) -> None:
         pass
 
 
-def cmd_backtest(args: argparse.Namespace) -> int:
-    """Headless single test: validate → stage → launch → poll → collect."""
+def cmd_tester(args: argparse.Namespace) -> int:
+    """Headless test/optimization: validate → stage → launch → poll → collect."""
     ini = Path(args.ini).resolve()
     if not ini.is_file():
         print(f"Error: INI not found: {ini}")
@@ -989,6 +1020,9 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         return 1
 
     tester = sections["Tester"]
+    optimization_mode = tester.get("Optimization", "0")
+    optimization = optimization_mode != "0"
+    print(f"Tester mode: {OPTIMIZATION_ENUM[optimization_mode]}")
     expert_rel = tester["Expert"].replace("\\", "/")
     host_ex5 = _resolve_expert_host(tester["Expert"])
     assert host_ex5 is not None  # validated above
@@ -1038,7 +1072,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         )
         return 1
     stage_dir.mkdir(parents=True, exist_ok=True)
-    staged = stage_dir / f"backtest-{ea_stem}-{ts}.ini"
+    staged = stage_dir / f"tester-{ea_stem.replace(' ', '_')}-{ts}.ini"
     norm_lines = _normalize_tester_ini_text(
         text.splitlines(), report_name
     )
@@ -1066,7 +1100,17 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         return 0
 
     # --- launch detached (pitfall #6) -------------------------------------
+    # Snapshot BEFORE launch so fast runs cannot hide their first journal lines.
     t_launch = time.time()
+    base_jp = _newest_journal(instance, t_launch - 86400)
+    base_jp_name = base_jp.name if base_jp else None
+    base_offset = base_jp.stat().st_size if base_jp else 0
+    # Optimization completion is in tester/logs, not terminal logs.
+    tester_log_dirs = [instance / "tester" / "logs", instance / "Tester" / "logs"]
+    tester_offsets = {
+        p: p.stat().st_size
+        for d in tester_log_dirs for p in d.glob("*.log")
+    }
     try:
         proc = subprocess.Popen(
             cmd,
@@ -1089,9 +1133,6 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     # lines and aborts a healthy launch. Only content appended after the
     # launch (bytes past the baseline offset, or a newly-created file)
     # counts as evidence.
-    base_jp = _newest_journal(instance, t_launch - 86400)
-    base_jp_name = base_jp.name if base_jp else None
-    base_offset = base_jp.stat().st_size if base_jp else 0
     try:
         deadline = t_launch + args.timeout
         while time.time() < deadline:
@@ -1137,8 +1178,30 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     else:
         print(f"\nWarn: no journal found under {instance / 'logs'}")
 
-    passed = "last test passed" in "\n".join(key_lines)
-    report = _locate_report(instance, report_name, t_launch)
+    tester_journals: list[str] = []
+    optimization_lines: list[str] = []
+    if optimization:
+        for jp in sorted({p for d in tester_log_dirs for p in d.glob("*.log")}):
+            new_text = _read_journal_since(jp, tester_offsets.get(jp, 0))
+            if not new_text:
+                continue
+            tester_journals.append(str(jp))
+            lines = _journal_key_lines(new_text)
+            optimization_lines.extend(lines)
+            print(f"\nTester journal: {jp}")
+            for ln in lines:
+                print(f"  {ln}")
+        key_lines.extend(optimization_lines)
+        passed = any(re.search(r"optimization finished, total passes [1-9]\d*\b", ln)
+                     for ln in optimization_lines)
+        passed = passed and not any(
+            marker in ln for ln in optimization_lines
+            for marker in ("optimization stopped", "optimization cancelled")
+        )
+    else:
+        passed = any('last test passed with result "successfully finished"' in ln
+                     for ln in key_lines)
+    report = _locate_report(instance, report_name, t_launch, optimization=optimization)
 
     outdir = (
         Path(args.out).resolve() if args.out
@@ -1149,7 +1212,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         outdir.mkdir(parents=True, exist_ok=True)
         to_copy = [report] + [
             p for suf in _REPORT_PNG_SUFFIXES
-            for p in [instance / f"{report.stem}{suf}"] if p.is_file()
+            for p in [instance / f"{report.stem}{suf}"] if not optimization and p.is_file()
         ]
         for p in to_copy:
             dest = outdir / p.name
@@ -1167,18 +1230,22 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             "status": status,
             "passed": passed,
             "ea": expert_rel,
+            "optimization": optimization_mode,
             "instance": str(instance),
             "staged_ini": str(staged),
             "journal": str(journal_path) if journal_path else None,
             "journal_key_lines": key_lines,
+            "tester_journals": tester_journals,
             "report": str(report) if report else None,
             "outdir": str(outdir) if artifacts else None,
             "artifacts": artifacts,
             "elapsed_s": round(time.time() - t_launch, 1),
         }, indent=2))
-    elif passed and artifacts:
-        # Parsed summary via parse_tester_report.py (same interpreter)
-        parser = Path(__file__).with_name("parse_tester_report.py")
+    elif passed and artifacts and not args.no_summary:
+        # XML optimization vs HTML single-test summary (same interpreter).
+        parser = Path(__file__).with_name(
+            "parse_optimizer_report.py" if optimization else "parse_tester_report.py"
+        )
         try:
             r = subprocess.run(
                 [sys.executable, str(parser), "report", str(outdir / report.name)],
@@ -1190,15 +1257,17 @@ def cmd_backtest(args: argparse.Namespace) -> int:
                     f"{outdir / report.name}"
                 )
         except (OSError, subprocess.TimeoutExpired):
-            print(f"\nNote: parse the report with: parse_tester_report.py {outdir / report.name}")
+            print(f"\nNote: parse the report with: {parser.name} report {outdir / report.name}")
 
-    if status != "exited":
+    if status == "timeout":
         return 2
+    if status != "exited":
+        return 1
     if not passed:
         return 1
     if report is None:
         return 1
-    print("\nBacktest OK.")
+    print("\nTester OK.")
     return 0
 
 
@@ -1336,7 +1405,7 @@ def cmd_init_ini(args: argparse.Namespace) -> int:
         "; Every input is listed as name=value||start||step||stop||Y|N —",
         "; inputs OMITTED from [TesterInputs] silently fall back to EA source",
         "; defaults (GIGO trap). To optimize a parameter: set start/step/stop",
-        "; and flip the trailing N → Y.",
+        "; and flip the trailing N → Y, then set Optimization=1 for complete Grid.",
         "",
         "[Tester]",
         f"Expert={expert}",
@@ -1389,7 +1458,7 @@ def cmd_init_ini(args: argparse.Namespace) -> int:
             f"Warn: {todos} value(s) are enum/datetime identifiers — replace "
             "them with numeric values before running (see TODO comments)"
         )
-    print("Next: review Symbol/Period/dates, then run: mql5_helper.py backtest " + str(out))
+    print("Next: review Symbol/Period/dates/Optimization, then run: mql5_helper.py tester " + str(out))
     return 0
 
 
@@ -1443,7 +1512,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="FromDate (default: today-2y)")
     init_p.add_argument("--to", dest="date_to", metavar="YYYY.MM.DD",
                         help="ToDate (default: today)")
-    init_p.add_argument("--model", default="4", help="0-4 (default 4 = real ticks)")
+    init_p.add_argument("--model", choices=MODEL_ENUM, default="4",
+                        help="0=every tick, 1=M1 OHLC, 2=open prices, 4=real ticks (default)")
     init_p.add_argument("--deposit", default="10000")
     init_p.add_argument("--currency", default="USD")
     init_p.add_argument("--leverage", default="100")
@@ -1452,8 +1522,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     init_p.add_argument("--json", action="store_true", help="Print parsed inputs as JSON, no INI")
 
     bt = sub.add_parser(
-        "backtest",
-        help="Headless single test: terminal64.exe /portable /config:<INI>",
+        "tester",
+        help="Headless single test or Grid optimization via INI: terminal64.exe /portable /config:<INI>",
     )
     bt.add_argument("ini", help="Tester config .ini (format: references/quick-ref-tester-automation.md)")
     bt.add_argument("--instance", metavar="DIR",
@@ -1466,7 +1536,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "from MT5_BASE, e.g. drive_c → C:\\). Must yield a SPACE-FREE "
                          "Windows path (pitfall #2)")
     bt.add_argument("-o", "--out", metavar="DIR",
-                    help="Dir to receive the report .html + PNGs "
+                    help="Dir to receive single-test HTML + PNGs or optimization XML "
                          "(default: ./tester-report-<EA>-<ts>)")
     bt.add_argument("--report-name", help="Override [Tester] Report= base name")
     bt.add_argument("--timeout", type=int, default=3600, help="Seconds (default 3600)")
@@ -1475,7 +1545,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Validate, stage, prepare, print launch command; do NOT launch")
     bt.add_argument("--json", action="store_true", help="Emit result as JSON")
     bt.add_argument("--no-summary", action="store_true",
-                    help="Skip the parse_tester_report.py summary print")
+                    help="Skip the single-test/optimization report summary print")
 
     args = parser.parse_args(argv)
 
@@ -1493,7 +1563,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "check": cmd_check,
         "deploy": cmd_deploy,
         "init-ini": cmd_init_ini,
-        "backtest": cmd_backtest,
+        "tester": cmd_tester,
     }
     return commands[args.command](args)
 

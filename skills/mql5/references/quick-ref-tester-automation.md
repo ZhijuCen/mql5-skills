@@ -1,136 +1,227 @@
-# Quick Ref — Tester Automation via CLI (`init-ini` + `backtest`)
+# Quick Ref — Tester Automation via CLI (`init-ini` + `tester`)
 
-Companion to `SKILL.md` §6. Headless single-test recipe for
-`terminal64.exe /portable /config:<INI>` on Linux/Wine, encoded in
-`scripts/mql5_helper.py` subcommands. Everything below was observed on
-2026-09-03 (MT5 build 6140, Wine 11.0, XAUUSD M15 2.4-year every-tick
-run ≈ 52–59 s); the error strings are greppable from the journal.
+Companion to `SKILL.md` §6. Headless single tests **and Grid optimization**
+via `terminal64.exe /portable /config:<INI>` on Linux/Wine, encoded in
+`scripts/mql5_helper.py`. The command formerly named `backtest` is now
+`tester` (no legacy alias); use `tester` in older recipes too.
 
-```
+```sh
 # 1. Generate an INI skeleton from the EA source (lists ALL inputs)
 python scripts/mql5_helper.py init-ini Experts/MyEA.mq5 \
     --symbol XAUUSD --period M15 --from 2024.02.26 --to 2026.07.04 \
     --model 4 -o MyEA.XAUUSD.M15.ini
 
-# 2. Run the single test headlessly; report lands in -o OUTDIR
-python scripts/mql5_helper.py backtest MyEA.XAUUSD.M15.ini \
+# 2. Review the INI: Optimization=0 for a single test; =1 for Grid.
+# For Grid, also set start/step/stop and Y for the inputs to vary.
+python scripts/mql5_helper.py tester MyEA.XAUUSD.M15.ini \
     [--instance DIR] [--stage-dir DIR] [-o OUTDIR] [--timeout 3600]
 ```
 
-`init-ini` extras: `--json` prints the parsed inputs instead of writing;
-enum/datetime identifiers that cannot be resolved from source are kept
-verbatim with a `; TODO:` line — replace them with the numeric value
-before running. `--expert PATH` overrides `Expert=` (default `<stem>.ex5`).
+`init-ini` defaults to `Optimization=0`; change that **in the INI** to
+select optimization. `--json` prints parsed inputs instead of writing;
+enum/datetime identifiers unresolved from source are kept verbatim with
+`; TODO:` comments — replace them with numeric values before running.
+`--expert PATH` overrides `Expert=` (default `<stem>.ex5`).
 
-## 1. Pitfall list (each cost a failed launch once)
+## 1. Pitfall list
 
-1. **Report working directory.** `[Tester] Report=<name>` writes
-   `<name>.htm` (sometimes `.html`) + `<name>.png` / `-hst.png` /
-   `-mfemae.png` / `-holding.png` into the **terminal working
-   directory** — the install root for `/portable` launches. NOT the
-   process CWD, NOT `MQL5\Files`, NOT the INI's directory. `backtest`
-   searches that dir for files newer than launch (prefers the `Report=`
-   stem, falls back to `ReportTester-*.htm*`) and copies them to
-   `-o OUTDIR`. Control the destination with `-o`; control the name
-   with `--report-name`.
+Single-test observations: 2026-09-03, MT5 build 6140, Wine 11.0,
+XAUUSD M15 2.4-year real-tick run ≈ 52–59 s.
+
+1. **Report working directory and format.** `[Tester] Report=<name>`
+   writes into the **terminal working directory** (install root with
+   `/portable`), NOT the process CWD, `MQL5\Files`, or the INI directory.
+   Single tests produce `.htm`/`.html` plus `.png`, `-hst.png`,
+   `-mfemae.png`, `-holding.png`; optimization produces SpreadsheetML
+   **`.xml`**, not HTML. `tester` searches for the appropriate format
+   newer than launch, prefers the `Report=` stem, then falls back to
+   `ReportTester-*` / `ReportOptimizer-*`. It copies artifacts to
+   `-o OUTDIR`; `--report-name` controls the report name.
 2. **`/config:` path must be Windows-style ABSOLUTE and SPACE-FREE.**
-   A path with spaces fails even when the shell quotes it; the journal
-   shows `cannot load config "C:\...\MetaTrader 5-auto\.agents-s4.ini"" at
-   start` (stray trailing-quote artifact of MT5's parser) and the
-   terminal silently boots as a plain GUI. The INI must also EXIST
-   before launch (a late `cp` costs a full launch cycle). `backtest`
-   stages the normalized INI via `--stage-dir` (default: the Wine drive
-   root derived from `MT5_BASE`, e.g. `…/drive_c` → `C:\`) and aborts
-   if the resulting Windows path contains spaces.
-3. **Single-instance lock.** A second `terminal64.exe` on the same
-   installation/data dir is refused while the user's GUI instance is
-   running. Run against a dedicated clone (`--instance`): a full
-   directory copy of the install needs `Bases\` (symbol history, the
-   bulk) and `MQL5\` (Include + the freshly deployed
-   `MQL5\Experts\<EA>.ex5` — refreshed after EVERY compile); `temp\`,
-   `logs\`, `Tester\Agent-*` caches can be excluded (~GB saved). The
-   clone is bootstrapped automatically on first `backtest` if missing.
-4. **`UseLocal=1` is REQUIRED.** Without it no local MetaTester agent
-   spawns and the run silently never starts (journal idles after
-   login; no agent log appears). `backtest` forces it in the staged
-   copy and errors on an explicit `UseLocal=0`.
-5. **`[TesterInputs]` format is mandatory even for single runs.** Every
-   line must be `name=value||start||step||stop||Y|N` (booleans/enums
-   use `step=0`); inputs omitted from the section silently fall back to
-   EA source defaults — a stale INI is a GIGO trap. `backtest` rejects
-   malformed lines instead of launching. Generate the skeleton with
-   `init-ini` so nothing is omitted.
-6. **Process control under Wine.** Launch detached
-   (`setsid`-equivalent); completion = terminal process exit
-   (`ShutdownTerminal=1`) + journal `last test passed` + report file
-   present. Poll; never fixed-sleep. Cleanup must not self-match: use a
-   character-class pattern (e.g. `pkill -f '5[-]auto'`) or kill the
-   process group (`killpg`) — a plain `pkill -f <pattern>` kills the
-   caller's own shell when the pattern appears in its command line.
+   Spaces can fail even when shell-quoted; journal:
+   `cannot load config "C:\...\MetaTrader 5-auto\.agents-s4.ini"" at start`.
+   The terminal then boots as a plain GUI. `tester` stages an existing,
+   normalized INI via `--stage-dir` (default: Wine drive root derived
+   from `MT5_BASE`, e.g. `…/drive_c` → `C:\`) and rejects spaces.
+3. **Single-instance lock.** Do not reuse an installation/data directory
+   that already has a running terminal. Use a dedicated `--instance`:
+   auto-cloned from `MT5_BASE` if absent, including `Bases\` history and
+   `MQL5\`. The helper refreshes the EA `.ex5` from host MQL5 on each run
+   unless `--no-refresh` is given. Do not interrupt the user's GUI or
+   another runner just to free its instance.
+4. **`UseLocal=1` is REQUIRED by this helper.** Without it the observed
+   run never spawned a local agent. `tester` forces it in the staged
+   copy and rejects explicit `UseLocal=0`. For local-only optimization,
+   also set `UseRemote=0` and `UseCloud=0` in the INI (no cloud charges).
+5. **`[TesterInputs]` format is mandatory even for single runs.**
+   `name=value||start||step||stop||Y|N`; booleans/enums use step 0.
+   Omitted inputs silently fall back to EA defaults. `tester` rejects
+   malformed lines; `init-ini` lists all declarations. For Grid, `Y`
+   selects the range, `N` keeps the value fixed. `sinput` is not
+   optimizable. Two values of one input × fixed others = **2 passes**.
+6. **Completion is mode-specific.** Require terminal exit
+   (`ShutdownTerminal=1`), the successful test/optimization journal
+   message, AND the correct report file. An HTML report from a single
+   test is not evidence of an optimization. Launch detached and poll;
+   on timeout/interrupt terminate only the launched process group,
+   never broadly kill Wine or other terminals.
 7. **Journal encoding + cumulative day file.** `logs\YYYYMMDD.log` is
-   UTF-16LE (naive `grep`/`tail` show NUL-padded text) and APPENDS
-   across the whole day — grep the whole file and you will see this
-   morning's stale failures. Slice from the byte offset recorded at
-   launch (÷2 for UTF-16LE chars). Key lines:
-   `automatic testing started` →
-   `last test passed with result "successfully finished" in 0:00:52` →
-   `exit with code 0`; failure tell: `cannot load config "..." at start`.
-8. **INI line endings.** CRLF used in the successful run (LF not
-   separately tested — convert to CRLF defensively). `backtest` always
-   writes the staged copy with CRLF.
+   UTF-16LE and appends throughout the day. Capture its byte offset
+   **before launch**, then read only newly appended content. Single-test
+   sequence: `automatic testing started` →
+   `last test passed with result "successfully finished"` →
+   `exit with code 0`. **Optimization completion is in
+   `tester/logs/YYYYMMDD.log`** (also check `Tester/logs`), not necessarily
+   the terminal journal: `complete optimization started` →
+   `optimization finished, total passes N`. The helper snapshots these
+   journals before launch too; stopped/cancelled optimization is failure.
+   Config failure: `cannot load config`.
+8. **INI normalization.** The staged copy uses CRLF and forces
+   `UseLocal=1`, `ReplaceReport=1`, `ShutdownTerminal=1`, and `Report=`.
+   Explicit `Optimization`/`Model` values are preserved; missing ones
+   default to 0 to avoid inheriting the runner's previous mode.
 
-## 2. `[Tester]` model enum
+## 2. `[Tester]` Optimization and Model enums
 
-| Model | Meaning | Note |
+Source: [MetaTrader 5 — Platform Start, configuration-file parameters](https://www.metatrader5.com/en/terminal/help/start_advanced/start#configuration_file).
+These are **INI numeric values**, not GUI row indices.
+
+### Optimization — all values
+
+| Value | Meaning | Use |
+|-------|---------|-----|
+| 0 | Optimization disabled | Single test using each input's `value` field; helper default when omitted |
+| 1 | Slow complete algorithm | **Grid / exhaustive search** of all combinations of selected input ranges |
+| 2 | Fast genetic algorithm | Genetic search; not an exhaustive Grid and not suitable for proving exactly 2 combinations |
+| 3 | All symbols selected in Market Watch | Run the EA with fixed inputs across selected symbols; not a parameter Grid |
+
+### Model — supported price models
+
+| Value | Meaning | Note |
 |-------|---------|------|
-| 0 | every tick (generated) | default accuracy baseline |
-| 1 | 1-minute OHLC | faster, coarser |
-| 2 | open prices only | fast screening only — never for final eval |
-| 3 | math calculations | no history needed |
-| 4 | every tick based on real ticks | **falls back to generated ticks when the broker history has none** — the report's `History Quality: 0% real ticks` line is the tell |
+| 0 | Every tick (generated) | Synthetic ticks generated from historical minute data; helper default when omitted |
+| 1 | 1-minute OHLC | Uses minute Open/High/Low/Close control points; faster and coarser than every tick |
+| 2 | Open prices only | Calls the EA at opens of the selected timeframe; fast screening for suitable bar-open strategies, not final intrabar evaluation |
+| 4 | Every tick based on real ticks | Uses broker tick history; may generate ticks for missing/inconsistent history — inspect report history quality and tester journal |
 
-## 3. `backtest` exit codes and outputs
+Value 3 is intentionally excluded and rejected by this helper; it is
+not used in verification. `init-ini --model` accepts only 0, 1, 2, 4.
+
+For example, comments must be on **separate lines** (the helper does not
+strip inline comments from INI values):
+
+```ini
+; Optimization: 0=single, 1=complete Grid, 2=genetic, 3=Market Watch symbols
+Optimization=1
+; Model: 0=generated every tick, 1=M1 OHLC, 2=open prices, 4=real ticks
+Model=1
+```
+
+## 3. `tester` exit codes and outputs
 
 | Code | Meaning |
 |------|---------|
-| 0 | journal `last test passed` AND report artifacts collected |
-| 1 | validation error / journal failure / report missing |
-| 2 | timeout (`--timeout` seconds, default 3600) — terminal killed |
-| 130 | interrupted by Ctrl-C (terminal killed) |
+| 0 | Terminal exited, mode-specific success journal found, report collected |
+| 1 | Validation / launch / config / journal failure, or report missing |
+| 2 | Timeout (`--timeout`, default 3600 s); launched terminal killed |
+| 130 | Ctrl-C; launched terminal killed |
 
-`--json` emits `{status, passed, ea, instance, staged_ini, journal,
-journal_key_lines, report, outdir, artifacts, elapsed_s}` instead of
-the text summary. `--dry-run` validates, stages, refreshes the `.ex5`
-and prints the launch command without launching (a missing instance is
-reported, not cloned). Default `-o` is `./tester-report-<EA>-<ts>/`.
+`--json` emits `{status, passed, ea, optimization, instance, staged_ini,
+journal, tester_journals, journal_key_lines, report, outdir, artifacts,
+elapsed_s}` instead
+of the parsed text summary (progress messages still precede the JSON).
+`optimization` is the INI mode string. `--no-summary` skips the parser.
+`--dry-run` validates, stages, refreshes `.ex5`, and prints the command
+without launching; a missing instance is reported but not cloned.
+Default `-o`: `./tester-report-<EA>-<ts>/`.
 
-The text summary is `parse_tester_report.py report <OUTDIR>/<report>.htm`
-(see `SKILL.md` §6 for the 8-step analysis order; run
-`windows --count N` over the collected report for over-fitting checks).
+Summary dispatch:
+- Single-test HTML: `parse_tester_report.py report <report>.htm`.
+- Optimization XML: `parse_optimizer_report.py report <report>.xml`.
 
-## 4. Worked example (evidence run)
+## 4. Two-pass Grid verification recipe
 
-```
-; INI (C:\mts4.ini) — [Tester] card
+Use the bundled MetaQuotes `Moving Average` EA (available under
+`MQL5/Experts/Examples/Moving Average/`). All inputs are listed, and only
+`MovingPeriod` varies, over **12 and 13**: `(13−12)/1+1 = 2` combinations.
+Disable forward testing to avoid extra runs. This is a plumbing check,
+not a performance recommendation.
+
+```ini
 [Tester]
-Expert=OneShotEA.ex5
+Expert=Examples\Moving Average\Moving Average.ex5
 Symbol=XAUUSD
 Period=M15
-Optimization=0
-Model=4
-FromDate=2024.02.26
-ToDate=2026.07.04
+; Complete exhaustive Grid (not genetic)
+Optimization=1
+; 1-minute OHLC
+Model=1
+FromDate=2026.08.03
+ToDate=2026.08.08
+ForwardMode=0
 Deposit=10000
 Currency=USD
 Leverage=100
-Report=OneShotEA-s4-verify
+OptimizationCriterion=1
+Report=agent-verify-grid-2pass
 ReplaceReport=1
 UseLocal=1
+UseRemote=0
+UseCloud=0
+Visual=0
 ShutdownTerminal=1
+
+[TesterInputs]
+MaximumRisk=0.02||0.02||0.01||0.02||N
+DecreaseFactor=3||3||1||3||N
+MovingPeriod=12||12||1||13||Y
+MovingShift=6||6||1||6||N
 ```
 
-Launch: `wine <instance>/terminal64.exe /portable /config:C:\mts4.ini`
-(detached), poll ≈ 60 s, report `ReportTester-<login>.htm*` + 4 PNGs
-land in the instance root, then get copied to the output dir. Note the
-produced report file may carry the login-numbered name even when
-`Report=` names something else — the fallback search handles this.
+```sh
+python scripts/mql5_helper.py tester grid.ini \
+    --instance /path/to/isolated-runner --report-name agent-verify-grid-2pass \
+    -o /tmp/agent-verify-grid/report --timeout 180
+```
+
+Verify the optimization completion journal, XML output, exactly two
+result rows, and `MovingPeriod` values `{12, 13}`. Prefer a fresh runner
+without optimization cache so the first check executes rather than
+merely retrieves cached passes.
+
+### Verified result — 2026-09-17
+
+MT5 **build 6182**, Wine 11.0; the exact INI above was run in a separate
+runner, leaving existing GUI/auto instances untouched. After correcting
+optimization-log detection, the final run returned **0** (`Tester OK.`).
+Its previously generated optimization cache was moved aside before the
+rerun so both passes were calculated, not merely loaded from cache.
+
+```text
+22:05:53.200  Tester      complete optimization started
+22:06:00.606  Tester      optimization finished, total passes 2
+22:06:00.616  Statistics  optimization done in 0 minutes 09 seconds
+22:06:00.631  Tester      2 new records saved to cache file ...
+22:06:01.150  Terminal    exit with code 0
+```
+
+`agent-verify-grid-2pass.xml` contained exactly two rows:
+
+| Pass | MovingPeriod | Trades | Profit (USD) |
+|------|--------------|--------|--------------|
+| 0 | 12 | 21 | 751.15 |
+| 1 | 13 | 22 | 292.86 |
+
+Local evidence (temporary, not committed):
+- INI: `/tmp/agent-verify-grid/grid.ini`
+- Helper/journal excerpt: `/tmp/agent-verify-grid/run-final.log`
+- XML: `/tmp/agent-verify-grid/report/agent-verify-grid-2pass.xml`
+
+The XML summary parser correctly reads the two passes and parameter
+values, but this build's environment metadata renders some header fields
+as `(unknown)` and the build incorrectly; use the INI and terminal log
+for that context. The parser itself is outside this two-file change.
+A separate `Optimization=0` regression also returned 0 and collected
+HTML + four PNGs; `--no-summary` skipped parsing as requested.
+Genetic and Market Watch modes are documented/accepted, but were not
+live-verified in this check; the demonstrated optimization mode is Grid.
