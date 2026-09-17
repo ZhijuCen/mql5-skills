@@ -162,6 +162,15 @@ ForwardMode=0
 Deposit=10000
 Currency=USD
 Leverage=100
+; OptimizationCriterion (INI values mapped to MT5 client option names):
+; 0 = Balance max
+; 1 = Profit Factor max
+; 2 = Expected Payoff max
+; 3 = Drawdown min
+; 4 = Recovery Factor max
+; 5 = Sharpe Ratio max
+; 6 = Custom max (value returned by the EA's OnTester())
+; 7 = Complex Criterion max
 OptimizationCriterion=1
 Report=agent-verify-grid-2pass
 ReplaceReport=1
