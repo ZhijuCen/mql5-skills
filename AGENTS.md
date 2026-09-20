@@ -34,7 +34,7 @@ mql5-skills/
 │   ├── mql5/              # The MQL5 development skill
 │       ├── SKILL.md       # Skill definition (agentskills.io spec)
 │       ├── scripts/
-│       │   ├── mql5_helper.py            # Compile/deploy/init-ini/backtest/status via Wine
+│       │   ├── mql5_helper.py            # Compile/deploy/init-ini/tester/status via Wine
 │       │   ├── parse_tester_report.py    # Backtest report parser + analysis
 │       │   ├── parse_optimizer_report.py # Optimization report parser + analysis
 │       │   └── verify_sl_tp_formulas.py  # SL/TP risk formula verification
@@ -98,17 +98,20 @@ Per agentskills.io spec:
 
 ### parse_tester_report.py
 
-Parses MT5 Strategy Tester HTML reports. Supports three output modes:
+Parses MT5 Strategy Tester HTML reports. Four sub-commands:
 
 ```
-# Text report (default)
-python skills/mql5/scripts/parse_tester_report.py <report.html>
+# Default text report (env card + key statistics + trade summary)
+python skills/mql5/scripts/parse_tester_report.py report <report.html>
 
-# JSON dump (raw parsed data)
-python skills/mql5/scripts/parse_tester_report.py <report.html> --json
+# Full trade analysis (idle_time, monthly breakdown, re-entry detection, streaks)
+python skills/mql5/scripts/parse_tester_report.py analyze <report.html>
 
-# JSON with trade analysis (--analyze includes idle_time, monthly breakdown, etc.)
-python skills/mql5/scripts/parse_tester_report.py <report.html> --analyze
+# JSON dump (raw parsed data) — any sub-command accepts --json
+python skills/mql5/scripts/parse_tester_report.py report <report.html> --json
+
+# Split into N equal time windows for over-fitting / regime detection
+python skills/mql5/scripts/parse_tester_report.py windows <report.html> --count N
 ```
 
 Key analysis fields: `idle_time` (HH:MM:SS flat duration across backtest period),
@@ -206,13 +209,23 @@ high-variance strategy — harder to predict live performance.
 
 Parses MT5 Strategy Tester Optimization XML reports (SpreadsheetML format
 — XML-tagged Excel workbook, also openable in LibreOffice Calc). Companion
-to `parse_tester_report.py`; same three output modes:
+to `parse_tester_report.py`; four sub-commands:
 
 ```
-python skills/mql5/scripts/parse_optimizer_report.py <ReportOptimizer-*.xml>
-python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --json
-python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --analyze
-python skills/mql5/scripts/parse_optimizer_report.py <report.xml> outliers [--sigma K] [--top-outliers N] [--top-normal M] [--sort ABBR_LIST] [--json]
+# Default text report (env card + parameter cardinalities + orthogonality)
+python skills/mql5/scripts/parse_optimizer_report.py report <ReportOptimizer-*.xml>
+
+# Full analysis (parameter effect, duplicates, best passes, trade distribution)
+python skills/mql5/scripts/parse_optimizer_report.py analyze <report.xml>
+
+# Per-pass z-score outlier scan (8 perf metrics)
+python skills/mql5/scripts/parse_optimizer_report.py outliers <report.xml> [--sigma K] [--top-outliers N] [--top-normal M] [--sort ABBR_LIST]
+
+# Failure-set analysis: per-parameter value distribution over deployable failures
+python skills/mql5/scripts/parse_optimizer_report.py failures <report.xml>
+
+# All sub-commands accept --json and -o OUTPUT_FILE
+python skills/mql5/scripts/parse_optimizer_report.py analyze <report.xml> --json -o analysis.json
 ```
 
 Reads `<DocumentProperties>` for the strategy environment card
@@ -305,7 +318,7 @@ optimization input, regardless of whether its name starts with
 
 ### mql5_helper.py
 
-MT5 development helper for compile/deploy/status via Wine:
+MT5 development helper for compile/deploy/init-ini/tester/status via Wine:
 
 ```
 python skills/mql5/scripts/mql5_helper.py compile FILE.mq5
@@ -314,7 +327,7 @@ python skills/mql5/scripts/mql5_helper.py deploy FILE.mq5
 python skills/mql5/scripts/mql5_helper.py status
 python skills/mql5/scripts/mql5_helper.py list
 python skills/mql5/scripts/mql5_helper.py init-ini FILE.mq5 [OPTS]
-python skills/mql5/scripts/mql5_helper.py backtest INI [OPTS]
+python skills/mql5/scripts/mql5_helper.py tester INI [OPTS]
 ```
 
 **init-ini** parses every `input`/`sinput` declaration in the `.mq5`
@@ -325,8 +338,8 @@ omitted inputs silently fall back to EA source defaults).
 `--json` prints the parsed inputs; unresolvable enum/datetime
 defaults are kept verbatim with a `; TODO:` comment.
 
-**backtest** runs a headless single Strategy Tester test via
-`terminal64.exe /portable /config:<INI>`: validates the INI (required
+**tester** runs a headless single Strategy Tester test **or Grid/genetic optimization**
+via `terminal64.exe /portable /config:<INI>`: validates the INI (required
 `[Tester]` keys, `UseLocal=1`, `[TesterInputs]` line format, `Expert=`
 resolves to an existing `.ex5`), stages a normalized CRLF copy at a
 SPACE-FREE Windows path (`--stage-dir`, default: Wine drive root
@@ -334,10 +347,13 @@ derived from `MT5_BASE`), refreshes the `.ex5` into the runner
 instance (`--instance`, cloned from `MT5_BASE` on first use so the
 user's GUI terminal is untouched), launches detached, polls process
 exit + UTF-16LE journal (only content appended after launch) + report
-file, copies the report `.htm` + PNGs to `-o OUTDIR`, and prints the
-`parse_tester_report.py report` summary. Exit: 0 pass, 1 fail, 2
-timeout. `--dry-run` stops before launch. Pitfall list with observed
-error strings: `skills/mql5/references/quick-ref-tester-automation.md`.
+file, copies the report artifacts to `-o OUTDIR`, and prints the
+summary. Optimization mode is controlled by `Optimization=` in the INI
+(0=single, 1=Grid, 2=genetic, 3=Market Watch); output format differs:
+single test produces HTML+PNGs, optimization produces SpreadsheetML XML.
+Exit: 0 pass, 1 fail, 2 timeout. `--dry-run` stops before launch.
+Pitfall list with observed error strings:
+`skills/mql5/references/quick-ref-tester-automation.md`.
 
 Paths are **never auto-detected**. `MT5_BASE`, `MQL5_DIR`, and
 `WINE_DISK_ROOT` must come from the environment or the project-root

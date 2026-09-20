@@ -236,8 +236,8 @@ Built-in to MT5. Modes: **Single Test**, **Optimization** (genetic),
 |-------------------------------|:---:|--------------------------------------------------|
 | Syntax check                  | ✅  | `wine MetaEditor64.exe /compile:"path" /log /s`  |
 | Compile `.mq5 → .ex5`         | ✅  | `wine MetaEditor64.exe /compile:"path" /log`     |
-| Single test (backtest)        | ✅  | `mql5_helper.py backtest INI` (headless `/config:`) |
-| Optimization                  | ❌  | GUI only: Strategy Tester (or `Optimization=1/2` in the same INI — untested) |
+| Single test (backtest)        | ✅  | `mql5_helper.py tester INI` (headless `/config:`) |
+| Optimization (Grid/genetic)   | ✅  | `mql5_helper.py tester INI` (set `Optimization=1/2` in INI) |
 | Parse tester / optimizer      | ✅  | `scripts/parse_tester_report.py` / `parse_optimizer_report.py` |
 
 Wine/MetaEditor **exit 0 ≠ compilation success** — require fresh
@@ -265,8 +265,8 @@ trailing `Y/N`, silently disables the parameter. Boolean / enum use
 
 Code (OnInit/OnTick/OnDeinit, OnTester) → CLI compile + check →
 `mql5_helper.py init-ini FILE.mq5` (INI skeleton listing ALL inputs) →
-review dates/model → `mql5_helper.py backtest INI -o OUTDIR`
-(headless single test; report `.htm` + PNGs copied to OUTDIR) →
+review dates/model → `mql5_helper.py tester INI -o OUTDIR`
+(headless single test or optimization; report artifacts copied to OUTDIR) →
 optimization → analyze → out-of-sample validation. Pitfalls + error
 strings: `references/quick-ref-tester-automation.md`.
 
@@ -492,8 +492,8 @@ Copy to `MQL5/Experts/` (under your terminal tree), `#include
   - `quick-ref-mql5-economic-calendar.md` — `MqlCalendarValue` 128-byte layout, `#resource` pitfalls.
   - `quick-ref-shadow-parameter-optimization.md` — shadow parameter compression (combo index).
   - `quick-ref-tester-deal-debug.md` — 6-step deal-level methodology for tester HTML.
-  - `quick-ref-tester-automation.md` — headless `backtest` recipe, pitfall list, Model enum.
+  - `quick-ref-tester-automation.md` — headless `tester` recipe, pitfall list, Model enum.
   - `quick-ref-optimizer-analysis.md` — env-card, dead params, `outliers`, `failures`.
 - **Book / API** (`references/`): `book/` (581-pg learning path; chapters `00-intro/` … `06-advanced/`); `docs/` (4135-pg API; top folders `19-trading/`, `16-series/`, `26-indicators/`, `24-customind/`, `13-event-handlers/`, `34-standardlibrary/`, `01-constants/`); `symbol-spec/specs-XAUUSD.csv`, `specs-USDJPY.csv`.
-- **Scripts** (`scripts/`): `parse_tester_report.py` (`report`/`analyze`/`windows`); `parse_optimizer_report.py` (`report`/`analyze`/`outliers`/`failures`); `parse_mql_calendar_bin.py` (positional PATH); `verify_sl_tp_formulas.py verify [SYMBOL ...]`; `mql5_helper.py` (`compile`/`check`/`deploy`/`status`/`list`/`init-ini`/`backtest`).
+- **Scripts** (`scripts/`): `parse_tester_report.py` (`report`/`analyze`/`windows`); `parse_optimizer_report.py` (`report`/`analyze`/`outliers`/`failures`); `parse_mql_calendar_bin.py` (positional PATH); `verify_sl_tp_formulas.py verify [SYMBOL ...]`; `mql5_helper.py` (`compile`/`check`/`deploy`/`status`/`list`/`init-ini`/`tester`).
 - **External**: [MQL5 Reference](https://www.mql5.com/en/docs), [MQL5 Book](https://www.mql5.com/en/book), [Strategy Tester Guide](https://www.mql5.com/en/terminal/strategytester).
