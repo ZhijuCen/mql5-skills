@@ -121,7 +121,10 @@ python skills/mql5/scripts/parse_tester_report.py windows <report.html> --count 
 ```
 
 Key analysis fields: `idle_time` (HH:MM:SS flat duration across backtest period),
-`win_loss_ratio`, `breakeven_win_rate`, `monthly`, `reentries`, `lot_pattern`.
+`win_loss_ratio`, `breakeven_win_rate`, `monthly`, `reentries`, `lot_pattern`,
+`eppl` (Expected Payoff Per Lot: per-trade net/volume stats),
+`hour_dist`, `weekday_dist`, `month_dist` (exit-time distributions with
+count/win_count/loss_count/win_sum/loss_sum per bucket).
 
 #### `windows` subcommand
 

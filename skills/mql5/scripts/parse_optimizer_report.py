@@ -22,11 +22,14 @@ This script extracts:
                            usually mean a parameter is dead), correlation
                            between trade count and result.
 
+Sub-commands: report, analyze, outliers, failures.
+
 Usage:
-    python skills/mql5/scripts/parse_optimizer_report.py <report.xml>
-    python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --json
-    python skills/mql5/scripts/parse_optimizer_report.py <report.xml> --analyze
-    python skills/mql5/scripts/parse_optimizer_report.py <report.xml> outliers [--top-outliers N] [--top-normal M] [--sigma K] [--sort ABBR_LIST] [--json]
+    python skills/mql5/scripts/parse_optimizer_report.py report <report.xml>
+    python skills/mql5/scripts/parse_optimizer_report.py analyze <report.xml>
+    python skills/mql5/scripts/parse_optimizer_report.py outliers <report.xml> [--sigma K] [--top-outliers N] [--top-normal M] [--sort ABBR_LIST]
+    python skills/mql5/scripts/parse_optimizer_report.py failures <report.xml>
+    # Any sub-command accepts --json and -o OUTPUT_FILE
 """
 
 from __future__ import annotations

@@ -3,10 +3,13 @@
 Parse MT5 Strategy Tester HTML report.
 
 Extracts: account properties, EA parameters, P&L metrics, orders, deals.
+Sub-commands: report, analyze, windows.
 
 Usage:
-    python skills/mql5/scripts/parse_tester_report.py <report.html>
-    python skills/mql5/scripts/parse_tester_report.py <report.html> --json
+    python skills/mql5/scripts/parse_tester_report.py report <report.html>
+    python skills/mql5/scripts/parse_tester_report.py analyze <report.html>
+    python skills/mql5/scripts/parse_tester_report.py analyze <report.html> --json
+    python skills/mql5/scripts/parse_tester_report.py windows <report.html> --count N
 """
 
 from __future__ import annotations
@@ -504,6 +507,42 @@ def print_report(r: Report, analyze_data: dict | None = None) -> None:
     if analyze_data:
         print(f"  Idle (no position): {analyze_data.get('idle_time', '')}")
 
+        # ── Expected Payoff Per Lot (EPPL) ─────────────────────────
+        eppl = analyze_data.get("eppl")
+        if eppl and eppl.get("count", 0) > 0:
+            print(f"\n{'─' * 72}")
+            print("  Expected Payoff Per Lot (EPPL = net / volume)")
+            print(f"{'─' * 72}")
+            print(f"  Mean:     {eppl['mean']:>12.4f}")
+            print(f"  Median:   {eppl['median']:>12.4f}")
+            print(f"  Std:      {eppl['std']:>12.4f}")
+            print(f"  Min:      {eppl['min']:>12.4f}")
+            print(f"  Max:      {eppl['max']:>12.4f}")
+            print(f"  Count:    {eppl['count']:>8}")
+
+        # ── Exit-time distribution ──────────────────────────────────
+        _WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        _dims = [
+            ("Hour",   "hour_dist",   {h: f"{h:02d}:00" for h in range(24)}),
+            ("Weekday","weekday_dist", {i: name for i, name in enumerate(_WEEKDAY_NAMES)}),
+            ("Month",  "month_dist",  {m: f"{m:02d}" for m in range(1, 13)}),
+        ]
+        for dim_name, dim_key, label_map in _dims:
+            dist = analyze_data.get(dim_key, {})
+            if not dist:
+                continue
+            print(f"\n{'─' * 72}")
+            print(f"  Exit Time Distribution by {dim_name}")
+            print(f"{'─' * 72}")
+            print(f"  {'Label':<10} {'Count':>6} {'Wins':>6} {'Losses':>6} "
+                  f"{'WinSum':>12} {'LossSum':>12}")
+            for key in sorted(dist.keys()):
+                label = label_map.get(key, str(key))
+                bucket = dist[key]
+                print(f"  {label:<10} {bucket['count']:>6} {bucket['win_count']:>6} "
+                      f"{bucket['loss_count']:>6} {bucket['win_sum']:>12,.2f} "
+                      f"{bucket['loss_sum']:>12,.2f}")
+
     print(f"\n{'─' * 72}")
     print(f"  Orders: {len(r.orders)}    Deals: {len(r.deals)}")
     print(f"{'─' * 72}")
@@ -802,6 +841,59 @@ def analyze_report(report: Report) -> dict:
         idle_td = total_duration - position_time
         idle_str = format_duration(idle_td)
 
+    # ── Expected Payoff Per Lot (EPPL) ───────────────────────────────
+    # For each exit trade: net / volume.  Then compute descriptive
+    # statistics over those per-lot values.
+    eppl_list = [t["net"] / t["volume"] for t in trades if t["volume"] > 0]
+    if eppl_list:
+        eppl_stats = {
+            "mean": round(statistics.fmean(eppl_list), 4),
+            "median": round(statistics.median(eppl_list), 4),
+            "std": round(statistics.stdev(eppl_list), 4) if len(eppl_list) > 1 else 0.0,
+            "min": round(min(eppl_list), 4),
+            "max": round(max(eppl_list), 4),
+            "count": len(eppl_list),
+        }
+    else:
+        eppl_stats = {}
+
+    # ── Exit-time distribution ────────────────────────────────────────
+    # Bucket exit trades by close_time hour, weekday, and month.
+    # Each bucket tracks: count, win_count, loss_count, win_sum, loss_sum.
+    def _init_bucket() -> dict:
+        return {"count": 0, "win_count": 0, "loss_count": 0,
+                "win_sum": 0.0, "loss_sum": 0.0}
+
+    hour_dist: dict[int, dict] = {}
+    weekday_dist: dict[int, dict] = {}
+    month_dist: dict[int, dict] = {}
+
+    for t in trades:
+        try:
+            close_dt = datetime.strptime(t["close_time"], "%Y.%m.%d %H:%M:%S")
+        except ValueError:
+            continue
+        hour = close_dt.hour          # 0-23
+        weekday = close_dt.weekday()  # 0=Mon .. 6=Sun
+        month = close_dt.month        # 1-12
+        is_win = t["net"] > 0
+        for key, dist in [(hour, hour_dist), (weekday, weekday_dist),
+                          (month, month_dist)]:
+            if key not in dist:
+                dist[key] = _init_bucket()
+            dist[key]["count"] += 1
+            if is_win:
+                dist[key]["win_count"] += 1
+                dist[key]["win_sum"] += t["net"]
+            else:
+                dist[key]["loss_count"] += 1
+                dist[key]["loss_sum"] += t["net"]
+    # Round sums
+    for dist in (hour_dist, weekday_dist, month_dist):
+        for key in dist:
+            dist[key]["win_sum"] = round(dist[key]["win_sum"], 2)
+            dist[key]["loss_sum"] = round(dist[key]["loss_sum"], 2)
+
     return {
         "sl_hits": len(sl_trades),
         "tp_hits": len(tp_trades),
@@ -817,6 +909,10 @@ def analyze_report(report: Report) -> dict:
             "uniform": len(unique_lots) == 1,
         },
         "idle_time": idle_str,
+        "eppl": eppl_stats,
+        "hour_dist": {k: v for k, v in sorted(hour_dist.items())},
+        "weekday_dist": {k: v for k, v in sorted(weekday_dist.items())},
+        "month_dist": {k: v for k, v in sorted(month_dist.items())},
         "trades": trades,
     }
 
