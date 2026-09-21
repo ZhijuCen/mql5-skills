@@ -99,6 +99,10 @@ Per agentskills.io spec:
     `skills/*/assets/templates/` and be referenced from `SKILL.md` by
     relative path. Do NOT paste full template code into `SKILL.md` body —
     keep body to instructions and link out to the template file.
+  - Templates MUST follow MQL5 code style conventions: `C` prefix +
+    PascalCase for classes, PascalCase for methods, `m_` prefix +
+    camelCase for member variables. Full spec:
+    `skills/mql5/references/quick-ref-code-style.md`.
 
 ## Scripts
 

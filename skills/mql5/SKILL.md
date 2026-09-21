@@ -64,6 +64,12 @@ account, one per broker). Each has its own `MQL5/`. To distinguish:
 **Use Magic Number** to distinguish EA trades across instances on
 the same symbol — each instance should own a unique magic.
 
+### Code Style and Conventions
+
+Naming (classes `C`+PascalCase, methods PascalCase, members `m_`+camelCase),
+class structure (private→protected→public), and MQH declaration/definition
+split: `references/quick-ref-code-style.md`.
+
 ## 2. Trading Operations
 
 ### Order vs Deal vs Position
@@ -380,16 +386,10 @@ every hypothesis must be compared against a reproducible baseline
 in a **separate validation stage** — never combine rollback + new
 signal + new order type in one unmeasured change.
 
-**Rollback Checklist** (verify each layer, not just the file you
-are editing): **(1) Configuration** — drop settings/modes the
-removed feature had; **(2) Lifecycle hooks** — drop its
-setup/teardown; **(3) Modules** — remove feature-only includes,
-restore the prior owner of the calculation; **(4) Order entry** —
-verify direction (buy/sell) and price-relation match prior
-semantics for the chosen order type; **(5) Optimization plumbing**
-— ordinary inputs should stay optimisable without internal map /
-decode table / compression; **(6) Documentation** — add a new
-decision/plan with reason, scope, consequences, and user test gate.
+**Rollback Checklist** (verify each layer): (1) Configuration;
+(2) Lifecycle hooks; (3) Modules; (4) Order entry (direction +
+price-relation); (5) Optimization plumbing; (6) Documentation
+(reason, scope, consequences, user test gate).
 
 **Hypothesis isolation**: only start the next experiment after
 the user has confirmed the rollback baseline. Otherwise

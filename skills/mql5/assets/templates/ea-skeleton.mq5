@@ -20,6 +20,10 @@ bool   IsHedging;
 datetime lastBarTime = 0;
 
 #include "risk-helpers.mqh"
+#include "position-manager.mqh"
+
+//--- position manager (one-symbol, one-magic)
+CPositionManager posMgr(_Symbol, EA_MAGIC, Slippage, /*maxPos=*/3);
 
 //+------------------------------------------------------------------+
 //| CTrade setup — call once in OnInit().                            |
@@ -84,10 +88,11 @@ void OnTick() {
         Print("OrderCalcProfit failed — cannot size the trade safely");
         return;
     }
-    PrintFormat("SL=%.5f lots=%.2f expected_loss=%.2f",
-                sl, lots, profit);
+    // PrintFormat("SL=%.5f lots=%.2f expected_loss=%.2f",
+    //             sl, lots, profit);
 
-    // trade.Buy(lots, _Symbol, 0, sl, 0, "EA Signal");
+    //--- use CPositionManager instead of raw CTrade
+    posMgr.Open(ORDER_TYPE_BUY, lots, bid, sl, 0, "EA Signal");
 }
 
 //+------------------------------------------------------------------+
