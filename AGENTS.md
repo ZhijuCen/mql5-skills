@@ -67,6 +67,12 @@ mql5-skills/
 │       └── references/
 │           ├── docs-talib/           # TA-Lib documentation (per-group)
 │           └── indicator-mappings/   # MQL5 ↔ TA-Lib mapping tables (WIP)
+│   └── mql-signals/      # The MQL5 copy-trading signal investigation skill
+│       ├── SKILL.md      # Skill definition (agentskills.io spec)
+│       ├── scripts/
+│       │   └── analyze_signals_csv.py  # Positions CSV forensics (stdlib-only)
+│       └── references/
+│           └── signals-analysis.md  # Metric cheat sheet + red-flag taxonomy
 ├── jobs/                  # Backtest job folders
 │   ├── 250013-job.md      # Job specification
 │   └── ReportTester-250013/
@@ -315,6 +321,30 @@ detected by **column position** — every column after `Trades` is an
 optimization input, regardless of whether its name starts with
 `Inp`. So an EA naming its params `StopLoss` / `TakeProfit` /
 `UseNewsFilter` parses correctly without script changes.
+
+### analyze_signals_csv.py
+
+Forensics for mql5.com copy-trading signal positions exports (trade
+history). Downloads from the signal page: *Trading history* tab →
+*Export to CSV: History* → `/en/signals/<ID>/export/positions` (login
+required, subscription NOT required). One sub-command:
+
+```
+python skills/mql-signals/scripts/analyze_signals_csv.py <positions.csv> [--page-trades N] [--page-profit X] [--page-win N] [--min-held-days N] [--recent-days N] [--from-month M] [--json] [-o FILE]
+```
+
+Parses the UTF-8-BOM, `;`-separated 11-column format
+(`Time;Type;Volume;Symbol;Price;Volume;Time;Price;Commission;Swap;Profit`);
+`Profit` excludes commission/swap, so net = Profit + Commission + Swap.
+`--page-*` values come from the detail page and produce a reconciliation
+line (hidden trades, profit delta vs page). Output sections: summary +
+reconciliation, funding ops, per-year profile (count / avg lot / median
+holding / sum lot / net → detects **strategy shifts**), per-symbol net,
+monthly net, tail risk (worst-k sums, worst-1% share of losses),
+chronological losing streak, holding pattern (≥N days — the "winners cut,
+losers held" dead-hang signature), recent window, and an auto `-- flagged --`
+block. Verified against signal 2271402 (1,860 deals, net within 0.2 of the
+page's 7,120.51) — see `references/signals-analysis.md` in `skills/mql-signals/`.
 
 ### mql5_helper.py
 
