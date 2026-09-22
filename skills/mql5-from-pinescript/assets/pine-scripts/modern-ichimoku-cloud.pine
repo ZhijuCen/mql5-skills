@@ -1,0 +1,410 @@
+//@version=6
+// Modern Ichimoku Cloud [GBB]  v0.5  2026-09-19
+// Layer 0: the built-in Ichimoku Kinko Hyo plot-for-plot (Classic mode).
+// Layer 1: normalised geometry.  Layer 2: qualified signals.  Layer 3: flat-line levels.
+// Layer 4: HTF wash, stats table, alerts.
+indicator("Modern Ichimoku Cloud [GBB]", "MKumo", overlay = true, max_lines_count = 500, max_labels_count = 50)
+
+
+// ---------- Inputs ----------
+grpC = "Classic"
+classicMode  = input.bool(false, "Classic mode (built-in Ichimoku; forces Layers 1-3 off)", group = grpC)
+tenkanLen    = input.int(9, "Tenkan-sen", minval = 1, group = grpC)
+kijunLen     = input.int(26, "Kijun-sen", minval = 1, group = grpC)
+senkouBLen   = input.int(52, "Senkou B", minval = 1, group = grpC)
+displacement = input.int(26, "Displacement", minval = 1, group = grpC)
+
+grpG = "Geometry (Layer 1)"
+inGeom  = input.bool(true, "Normalised geometry (ATR units, percentile grades)", group = grpG)
+atrLen  = input.int(0, "ATR length (0 = Kijun)", minval = 0, group = grpG)
+pctLen  = input.int(150, "Percentile window", minval = 10, group = grpG)
+pctThin = input.int(30, "Thin <= pct", minval = 0, maxval = 100, group = grpG)
+pctThk  = input.int(70, "Thick >= pct", minval = 0, maxval = 100, group = grpG)
+pctVThk = input.int(90, "Very thick >= pct", minval = 0, maxval = 100, group = grpG)
+showGradeLabel = input.bool(true, "Grade label on last bar", group = grpG)
+
+grpS = "Signals (Layer 2)"
+inQualified = input.bool(true, "Qualified signals", group = grpS)
+pcMin       = input.float(1.0, "Min price-to-cloud distance (ATR), KUMO events", minval = 0.0, step = 0.05, group = grpS)
+chkMin      = input.float(1.0, "Min Chikou momentum (ATR)", minval = 0.0, step = 0.05, group = grpS)
+useHtfFilt  = input.bool(false, "Require HTF cloud agreement", group = grpS)
+showMarkers = input.bool(true, "Show event markers", group = grpS)
+showRaw     = input.bool(true, "Show unqualified events", group = grpS)
+
+grpF = "Flat levels (Layer 3)"
+inFlat    = input.bool(true, "Flat-line levels", group = grpF)
+flatMinK  = input.int(6, "Kijun flat min bars", minval = 2, group = grpF)
+flatMinB  = input.int(8, "Senkou B flat min bars", minval = 2, group = grpF)
+touchTol  = input.float(0.05, "Touch tolerance (ATR)", minval = 0.0, step = 0.05, group = grpF)
+maxAgeMul = input.int(3, "Max age (x Kijun bars)", minval = 1, group = grpF)
+maxLevels = input.int(60, "Max live level objects", minval = 5, maxval = 400, group = grpF)
+hideExpired = input.bool(true, "Hide expired levels", group = grpF)
+
+grpH = "HTF & table (Layer 4)"
+inHtf     = input.bool(true, "HTF wash", group = grpH)
+htfSel    = input.timeframe("", "HTF (blank = auto, 4x chart)", group = grpH)
+showTable = input.bool(false, "Stats table", group = grpH)
+statsH2   = input.int(10, "Second stats horizon (bars)", minval = 1, maxval = 500, group = grpH)
+tableExpanded = input.bool(false, "Expanded stats table (counts)", group = grpH)
+
+grpV = "Style"
+paletteSel = input.string("GBB", "Palette", options = ["GBB", "Classic", "Mono"], group = grpV)
+themeSel   = input.string("Auto", "Theme", options = ["Auto", "Dark", "Light"], group = grpV)
+
+// Classic mode forces Layers 1-3 off; Layer 4 stays available.
+bool useL1 = not classicMode and inGeom
+bool useL2 = not classicMode and inQualified
+bool useL3 = not classicMode and inFlat
+int  off   = displacement - 1
+int  atrN  = atrLen > 0 ? atrLen : kijunLen
+int  maxAge = maxAgeMul * kijunLen
+
+// ---------- Palette ----------
+float bgLum = (0.299 * color.r(chart.bg_color) + 0.587 * color.g(chart.bg_color) + 0.114 * color.b(chart.bg_color)) / 255
+bool lightTheme = themeSel == "Light" or (themeSel == "Auto" and bgLum > 0.5)
+color cTenkan = paletteSel == "Classic" ? #2962FF : paletteSel == "Mono" ? (lightTheme ? #424242 : #e0e0e0) : lightTheme ? #0d9488 : #2dd4bf
+color cKijun  = paletteSel == "Classic" ? #B71C1C : paletteSel == "Mono" ? (lightTheme ? #757575 : #9e9e9e) : lightTheme ? #b45309 : #ffb020
+color cSpanA  = paletteSel == "Classic" ? #A5D6A7 : paletteSel == "Mono" ? (lightTheme ? #616161 : #bdbdbd) : lightTheme ? #b8860b : #ffd60a
+color cSpanB  = paletteSel == "Classic" ? #EF9A9A : paletteSel == "Mono" ? (lightTheme ? #9e9e9e : #757575) : lightTheme ? #d92507 : #ff3814
+color cChikou = paletteSel == "Classic" ? #43A047 : paletteSel == "Mono" ? (lightTheme ? #212121 : #ffffff) : lightTheme ? #1d6fb8 : #94d2ff
+color cBull   = paletteSel == "Classic" ? #43A047 : paletteSel == "Mono" ? (lightTheme ? #212121 : #ffffff) : lightTheme ? #a16207 : #ffd60a
+color cBear   = paletteSel == "Classic" ? #F44336 : paletteSel == "Mono" ? (lightTheme ? #9e9e9e : #bdbdbd) : lightTheme ? #cc2000 : #ff3814
+color cRaw    = color.new(#9e9e9e, 55)
+color cTwist  = paletteSel == "Mono" ? (lightTheme ? #424242 : #e0e0e0) : lightTheme ? #d6336c : #ff8fab
+color cWashUp = paletteSel == "Mono" ? #9e9e9e : lightTheme ? #b8860b : #ffd60a
+color cWashDn = paletteSel == "Mono" ? #616161 : lightTheme ? #d92507 : #ff3814
+color cWashIn = paletteSel == "Mono" ? #757575 : lightTheme ? #b45309 : #ffb020
+
+// ---------- Layer 0: the five lines ----------
+// One function so the same stack runs on the chart and inside request.security.
+f_lines() =>
+    float t = (ta.highest(high, tenkanLen) + ta.lowest(low, tenkanLen)) / 2
+    float k = (ta.highest(high, kijunLen) + ta.lowest(low, kijunLen)) / 2
+    float a = (t + k) / 2
+    float b = (ta.highest(high, senkouBLen) + ta.lowest(low, senkouBLen)) / 2
+    [t, k, a, b]
+
+[tenkan, kijun, senkouA, senkouB] = f_lines()
+
+// Cloud under the current bar: the span computed `displacement - 1` bars ago.
+float spanAcur = senkouA[off]
+float spanBcur = senkouB[off]
+float upperC = math.max(spanAcur, spanBcur)
+float lowerC = math.min(spanAcur, spanBcur)
+int   cloudPos = na(upperC) ? 0 : close > upperC ? 1 : close < lowerC ? -1 : 0
+
+// ---------- Layer 1: normalised geometry ----------
+float A = ta.atr(atrN)
+float thick = A > 0 ? math.abs(spanAcur - spanBcur) / A : na
+float tk    = A > 0 ? (tenkan - kijun) / A : na
+float pc    = A > 0 and not na(upperC) ? (close > upperC ? (close - upperC) / A : close < lowerC ? (close - lowerC) / A : 0.0) : na
+float chk   = A > 0 ? (close - close[off]) / A : na
+// Projected thickness (at computation time) for the fill transparency of the drawn cloud.
+float thickProj = A > 0 ? math.abs(senkouA - senkouB) / A : na
+
+// Nearest-rank percentiles, guarded for the warm-up.
+float p30raw = ta.percentile_nearest_rank(thick, pctLen, pctThin)
+float p70raw = ta.percentile_nearest_rank(thick, pctLen, pctThk)
+float p90raw = ta.percentile_nearest_rank(thick, pctLen, pctVThk)
+float q30raw = ta.percentile_nearest_rank(thickProj, pctLen, pctThin)
+float q70raw = ta.percentile_nearest_rank(thickProj, pctLen, pctThk)
+float q90raw = ta.percentile_nearest_rank(thickProj, pctLen, pctVThk)
+bool  pctReady = bar_index >= pctLen
+f_grade(float x, float lo, float mid, float hi) =>
+    na(x) or na(lo) or na(mid) or na(hi) ? -1 : x >= hi ? 3 : x >= mid ? 2 : x <= lo ? 0 : 1
+int grade     = useL1 and pctReady ? f_grade(thick, p30raw, p70raw, p90raw) : -1
+int gradeProj = useL1 and pctReady ? f_grade(thickProj, q30raw, q70raw, q90raw) : -1
+string gradeTxt = grade == 0 ? "thin" : grade == 1 ? "normal" : grade == 2 ? "thick" : grade == 3 ? "very thick" : "n/a"
+
+// ---------- Plots (Layer 0 visuals, Layer 1 transparency) ----------
+plot(tenkan, "Tenkan-sen", color = cTenkan, linewidth = 2)
+plot(kijun, "Kijun-sen", color = cKijun, linewidth = 3)
+plot(close, "Chikou", color = color.new(cChikou, 25), offset = -off, linewidth = 1)
+pA = plot(senkouA, "Senkou A", color = cSpanA, offset = off, linewidth = 2)
+pB = plot(senkouB, "Senkou B", color = cSpanB, offset = off, linewidth = 2)
+// Fill density follows the projected thickness grade.
+int cloudTransp = useL1 ? (gradeProj == 3 ? 50 : gradeProj == 2 ? 58 : gradeProj == 1 ? 68 : gradeProj == 0 ? 78 : 74) : 68
+color cloudUp = paletteSel == "Classic" ? color.new(#43A047, cloudTransp) : color.new(cSpanA, cloudTransp)
+color cloudDn = paletteSel == "Classic" ? color.new(#F44336, cloudTransp) : color.new(cSpanB, cloudTransp)
+fill(pA, pB, color = senkouA > senkouB ? cloudUp : cloudDn, title = "Kumo")
+
+// ---------- Layer 4a: HTF cloud position from closed HTF bars ----------
+f_htf() =>
+    [hT, hK, hA, hB] = f_lines()
+    float sA = hA[off]
+    float sB = hB[off]
+    [sA[1], sB[1], close[1]]
+
+string htfTf = htfSel == "" ? timeframe.from_seconds(4 * timeframe.in_seconds()) : htfSel
+bool htfActive = inHtf and timeframe.in_seconds(htfTf) > timeframe.in_seconds()
+[htfA, htfB, htfC] = request.security(syminfo.tickerid, htfTf, f_htf(), lookahead = barmerge.lookahead_off)
+int htfPos = na(htfA) or na(htfB) or na(htfC) ? 0 : htfC > math.max(htfA, htfB) ? 1 : htfC < math.min(htfA, htfB) ? -1 : 0
+color htfWash = not htfActive ? na : htfPos > 0 ? color.new(cWashUp, 96) : htfPos < 0 ? color.new(cWashDn, 96) : color.new(cWashIn, 97)
+bgcolor(htfWash, title = "HTF wash")
+
+var label htfNote = na
+if inHtf and not htfActive and barstate.islast
+    if na(htfNote)
+        htfNote := label.new(bar_index, close, "HTF wash off: HTF " + htfTf + " is not above the chart timeframe",
+             style = label.style_label_left, color = color.new(color.gray, 70), textcolor = color.white, size = size.small)
+    else
+        label.set_xy(htfNote, bar_index, close)
+
+// ---------- Layer 2: raw events and qualification ----------
+bool tkBull = ta.crossover(tenkan, kijun)
+bool tkBear = ta.crossunder(tenkan, kijun)
+bool kumoUp = ta.crossover(close, upperC)
+bool kumoDn = ta.crossunder(close, lowerC)
+bool twBull = ta.crossover(senkouA, senkouB)
+bool twBear = ta.crossunder(senkouA, senkouB)
+// Classic grade of a TK cross: strong / neutral / weak by price above / inside / below the cloud.
+int tkGrade = tkBull ? (cloudPos > 0 ? 2 : cloudPos == 0 ? 1 : 0) : tkBear ? (cloudPos < 0 ? 2 : cloudPos == 0 ? 1 : 0) : -1
+
+int barDir = int(math.sign(close - open))
+f_qual(int dir, bool isKumo) =>
+    bool okDir = barDir == dir
+    bool okPc  = isKumo ? (not na(pc) and math.abs(pc) >= pcMin) : (not na(pc) and pc != 0)
+    bool okChk = not na(chk) and math.sign(chk) == dir and math.abs(chk) >= chkMin
+    bool okHtf = not useHtfFilt or (htfActive and htfPos == dir)
+    okDir and okPc and okChk and okHtf
+
+bool qBull = f_qual(1, false)
+bool qBear = f_qual(-1, false)
+bool qUp   = f_qual(1, true)
+bool qDn   = f_qual(-1, true)
+// Layer 2 off: qualified = raw.
+bool tkBullQ = tkBull and (not useL2 or qBull)
+bool tkBearQ = tkBear and (not useL2 or qBear)
+bool kumoUpQ = kumoUp and (not useL2 or qUp)
+bool kumoDnQ = kumoDn and (not useL2 or qDn)
+int  qualDir = tkBullQ or kumoUpQ ? 1 : tkBearQ or kumoDnQ ? -1 : 0
+
+bool mk = showMarkers and not classicMode
+// Kumo breaks are the headline markers; TK crosses are smaller; twists and raw events are ambient.
+plotshape(mk and tkBullQ, "TK bull (qualified)", style = shape.triangleup, location = location.belowbar, color = cBull, size = size.small)
+plotshape(mk and tkBearQ, "TK bear (qualified)", style = shape.triangledown, location = location.abovebar, color = cBear, size = size.small)
+plotshape(mk and kumoUpQ, "KUMO up (qualified)", style = shape.triangleup, location = location.belowbar, color = cBull, size = size.normal)
+plotshape(mk and kumoDnQ, "KUMO down (qualified)", style = shape.triangledown, location = location.abovebar, color = cBear, size = size.normal)
+plotshape(mk and showRaw and useL2 and ((tkBull and not tkBullQ) or (kumoUp and not kumoUpQ)), "Unqualified bull event", style = shape.circle, location = location.belowbar, color = cRaw, size = size.tiny)
+plotshape(mk and showRaw and useL2 and ((tkBear and not tkBearQ) or (kumoDn and not kumoDnQ)), "Unqualified bear event", style = shape.circle, location = location.abovebar, color = cRaw, size = size.tiny)
+plotshape(mk and twBull, "Twist bull", style = shape.diamond, location = location.bottom, color = color.new(cTwist, 20), size = size.tiny)
+plotshape(mk and twBear, "Twist bear", style = shape.diamond, location = location.top, color = color.new(cTwist, 20), size = size.tiny)
+
+// ---------- Layer 3: flat-line levels ----------
+// Run length: number of consecutive bars with exactly the same line value (first bar counts 1).
+int flatK = 0
+flatK := kijun == kijun[1] ? nz(flatK[1]) + 1 : 1
+int flatB = 0
+flatB := senkouB == senkouB[1] ? nz(flatB[1]) + 1 : 1
+
+var array<line>  lvLine  = array.new<line>()
+var array<float> lvVal   = array.new<float>()
+var array<int>   lvAct   = array.new<int>()
+var array<int>   lvKind  = array.new<int>()     // 0 kijun, 1 senkou B
+var array<int>   lvState = array.new<int>()     // 0 live, 1 touched, 2 expired
+var int nLvlK = 0
+var int nLvlB = 0
+var int nTouchK = 0
+var int nTouchB = 0
+var int nExpK = 0
+var int nExpB = 0
+bool flatTouch = false
+
+f_addLevel(float lvl, int seg, int kind) =>
+    int flatMin = kind == 0 ? flatMinK : flatMinB
+    int w = seg >= 2 * flatMin ? 2 : 1
+    color col = kind == 0 ? cKijun : cSpanB
+    line id = line.new(bar_index - seg, lvl, bar_index, lvl, xloc = xloc.bar_index, color = color.new(col, 15),
+         style = line.style_solid, width = w)
+    array.push(lvLine, id)
+    array.push(lvVal, lvl)
+    array.push(lvAct, bar_index)
+    array.push(lvKind, kind)
+    array.push(lvState, 0)
+    if array.size(lvLine) > maxLevels
+        line.delete(array.shift(lvLine))
+        array.shift(lvVal)
+        array.shift(lvAct)
+        array.shift(lvKind)
+        array.shift(lvState)
+
+if useL3 and barstate.isconfirmed
+    // 1. Live levels: touch on this bar (window starts the bar after activation), else expiry.
+    int nL = array.size(lvLine)
+    if nL > 0
+        for i = 0 to nL - 1
+            if array.get(lvState, i) == 0
+                float lvl = array.get(lvVal, i)
+                line id = array.get(lvLine, i)
+                int kind = array.get(lvKind, i)
+                float tol = touchTol * A
+                bool touched = not na(A) and low - tol <= lvl and lvl <= high + tol
+                if touched
+                    array.set(lvState, i, 1)
+                    line.set_x2(id, bar_index)
+                    line.set_color(id, color.new(kind == 0 ? cKijun : cSpanB, 0))
+                    flatTouch := true
+                    if kind == 0
+                        nTouchK += 1
+                    else
+                        nTouchB += 1
+                else if bar_index - array.get(lvAct, i) >= maxAge
+                    array.set(lvState, i, 2)
+                    line.set_x2(id, bar_index)
+                    line.set_style(id, line.style_dotted)
+                    line.set_color(id, color.new(kind == 0 ? cKijun : cSpanB, hideExpired ? 100 : 80))
+                else
+                    line.set_x2(id, bar_index)
+    // 2. New levels on the first bar the line moves after a run of at least flatMin bars.
+    if kijun != kijun[1] and nz(flatK[1]) >= flatMinK and not na(kijun[1])
+        f_addLevel(kijun[1], nz(flatK[1]), 0)
+        nLvlK += 1
+    if senkouB != senkouB[1] and nz(flatB[1]) >= flatMinB and not na(senkouB[1])
+        f_addLevel(senkouB[1], nz(flatB[1]), 1)
+        nLvlB += 1
+
+// ---------- Grade label ----------
+var label gradeLbl = na
+if useL1 and showGradeLabel and barstate.islast
+    string txt = "Kumo " + gradeTxt + (na(thick) ? "" : " (" + str.tostring(thick, "0.00") + " ATR)") +
+         (na(pc) ? "" : "  ·  price " + str.tostring(pc, "0.00") + " ATR from cloud") +
+         (na(chk) ? "" : "  ·  chikou " + str.tostring(chk, "0.00") + " ATR")
+    if na(gradeLbl)
+        gradeLbl := label.new(bar_index, upperC, txt, style = label.style_label_left,
+             color = color.new(#0a0c10, 85), textcolor = color.new(color.white, 20), size = size.small)
+    else
+        label.set_xy(gradeLbl, bar_index, upperC)
+        label.set_text(gradeLbl, txt)
+
+// ---------- Data-window plots (not drawn; used by alert placeholders) ----------
+plot(tenkan, "Tenkan", display = display.data_window)
+plot(kijun, "Kijun", display = display.data_window)
+plot(senkouA, "SenkouA", display = display.data_window)
+plot(senkouB, "SenkouB", display = display.data_window)
+plot(thick, "Thick", display = display.data_window)
+plot(tk, "TK", display = display.data_window)
+plot(pc, "PC", display = display.data_window)
+plot(chk, "CHK", display = display.data_window)
+plot(grade, "Grade", display = display.data_window)
+plot(qualDir, "QualDir", display = display.data_window)
+plot(tkGrade, "TKGrade", display = display.data_window)
+
+// ---------- Layer 4b: stats table ----------
+// Running counts on loaded bars; each event scored once, H bars after it, on confirmed bars.
+var int nTkRaw = 0
+var int nTkQ = 0
+var int nKuRaw = 0
+var int nKuQ = 0
+var int nTw = 0
+var int nScored1 = 0
+var int nHit1 = 0
+var int nScored2 = 0
+var int nHit2 = 0
+var float sumFwdAll = 0.0
+var int nFwdAll = 0
+var float sumFwdEv = 0.0
+var int nFwdEv = 0
+int H1 = displacement
+int H2 = statsH2
+float atrH1 = A[H1]
+float fwdRange = na(atrH1) or atrH1 == 0 ? na : (ta.highest(high, H1) - ta.lowest(low, H1)) / atrH1
+if barstate.isconfirmed
+    if tkBull or tkBear
+        nTkRaw += 1
+    if tkBullQ or tkBearQ
+        nTkQ += 1
+    if kumoUp or kumoDn
+        nKuRaw += 1
+    if kumoUpQ or kumoDnQ
+        nKuQ += 1
+    if twBull or twBear
+        nTw += 1
+    if bar_index >= H1
+        int d1 = nz(qualDir[H1])
+        if d1 != 0
+            nScored1 += 1
+            if math.sign(close - close[H1]) == d1
+                nHit1 += 1
+        if not na(fwdRange)
+            sumFwdAll += fwdRange
+            nFwdAll += 1
+            if d1 != 0
+                sumFwdEv += fwdRange
+                nFwdEv += 1
+    if bar_index >= H2
+        int d2 = nz(qualDir[H2])
+        if d2 != 0
+            nScored2 += 1
+            if math.sign(close - close[H2]) == d2
+                nHit2 += 1
+
+// Compact table: key rates only; counts behind the "Expanded stats table" input.
+var table stats = na
+f_cell(int c, int r, string txt, bool left) =>
+    table.cell(stats, c, r, txt, text_color = left ? color.new(color.white, 40) : color.white,
+         text_size = size.small, text_halign = left ? text.align_left : text.align_right)
+
+if showTable and barstate.islast
+    if na(stats)
+        stats := table.new(position.top_right, 2, 10, bgcolor = color.new(#0a0c10, 28), border_width = 0)
+    float hit1 = nScored1 > 0 ? 100.0 * nHit1 / nScored1 : na
+    float hit2 = nScored2 > 0 ? 100.0 * nHit2 / nScored2 : na
+    float rangeMult = nFwdEv > 0 and nFwdAll > 0 and sumFwdAll > 0 ? (sumFwdEv / nFwdEv) / (sumFwdAll / nFwdAll) : na
+    // expired = created - touched - still live (per kind)
+    int liveK = 0
+    int liveB = 0
+    int nL = array.size(lvLine)
+    if nL > 0
+        for i = 0 to nL - 1
+            if array.get(lvState, i) == 0
+                if array.get(lvKind, i) == 0
+                    liveK += 1
+                else
+                    liveB += 1
+    nExpK := math.max(nLvlK - nTouchK - liveK, 0)
+    nExpB := math.max(nLvlB - nTouchB - liveB, 0)
+    float touchRate = (nTouchK + nTouchB + nExpK + nExpB) > 0 ? 100.0 * (nTouchK + nTouchB) / (nTouchK + nTouchB + nExpK + nExpB) : na
+    string qLbl = useL2 ? "qualified" : "raw"
+    table.cell(stats, 0, 0, "Hit rate @" + str.tostring(H1) + " (" + qLbl + ")", text_color = color.new(color.white, 40),
+         text_size = size.small, text_halign = text.align_left,
+         tooltip = "Running counts on loaded bars, not a backtest. Range multiple is a mean. Reset on settings change and reload. No costs.")
+    table.cell(stats, 1, 0, na(hit1) ? "-" : str.tostring(hit1, "0.0") + "% (" + str.tostring(nScored1) + ")",
+         text_color = na(hit1) ? color.new(color.white, 40) : hit1 >= 50 ? cBull : color.white, text_size = size.small, text_halign = text.align_right)
+    f_cell(0, 1, "Hit rate @" + str.tostring(H2), true)
+    table.cell(stats, 1, 1, na(hit2) ? "-" : str.tostring(hit2, "0.0") + "% (" + str.tostring(nScored2) + ")",
+         text_color = na(hit2) ? color.new(color.white, 40) : hit2 >= 50 ? cBull : color.white, text_size = size.small, text_halign = text.align_right)
+    f_cell(0, 2, "Range multiple @" + str.tostring(H1), true)
+    f_cell(1, 2, na(rangeMult) ? "-" : str.tostring(rangeMult, "0.00") + "x", false)
+    f_cell(0, 3, "Touch rate (retired levels)", true)
+    f_cell(1, 3, na(touchRate) ? "-" : str.tostring(touchRate, "0.0") + "%", false)
+    f_cell(0, 4, "HTF " + htfTf, true)
+    table.cell(stats, 1, 4, not htfActive ? "off" : htfPos > 0 ? "above cloud" : htfPos < 0 ? "below cloud" : "inside cloud",
+         text_color = not htfActive ? color.new(color.white, 40) : htfPos > 0 ? cWashUp : htfPos < 0 ? cWashDn : cWashIn,
+         text_size = size.small, text_halign = text.align_right)
+    if tableExpanded
+        f_cell(0, 5, "TK cross raw / " + qLbl, true)
+        f_cell(1, 5, str.tostring(nTkRaw) + " / " + str.tostring(nTkQ), false)
+        f_cell(0, 6, "Kumo break raw / " + qLbl, true)
+        f_cell(1, 6, str.tostring(nKuRaw) + " / " + str.tostring(nKuQ), false)
+        f_cell(0, 7, "Twists", true)
+        f_cell(1, 7, str.tostring(nTw), false)
+        f_cell(0, 8, "Kijun levels created / touched / expired", true)
+        f_cell(1, 8, str.tostring(nLvlK) + " / " + str.tostring(nTouchK) + " / " + str.tostring(nExpK), false)
+        f_cell(0, 9, "Senkou B levels created / touched / expired", true)
+        f_cell(1, 9, str.tostring(nLvlB) + " / " + str.tostring(nTouchB) + " / " + str.tostring(nExpB), false)
+
+// ---------- Alerts: confirmed bars only ----------
+bool alTkBull = barstate.isconfirmed and tkBullQ
+bool alTkBear = barstate.isconfirmed and tkBearQ
+bool alKuUp   = barstate.isconfirmed and kumoUpQ
+bool alKuDn   = barstate.isconfirmed and kumoDnQ
+bool alTwBull = barstate.isconfirmed and twBull
+bool alTwBear = barstate.isconfirmed and twBear
+bool alTouch  = barstate.isconfirmed and flatTouch
+alertcondition(alTkBull, "Qualified TK cross - bull", 'MKumo {{ticker}} {{interval}}: qualified TK cross BULL, grade {{plot("Grade")}}')
+alertcondition(alTkBear, "Qualified TK cross - bear", 'MKumo {{ticker}} {{interval}}: qualified TK cross BEAR, grade {{plot("Grade")}}')
+alertcondition(alKuUp, "Qualified Kumo breakout - up", 'MKumo {{ticker}} {{interval}}: qualified Kumo breakout UP, grade {{plot("Grade")}}')
+alertcondition(alKuDn, "Qualified Kumo breakout - down", 'MKumo {{ticker}} {{interval}}: qualified Kumo breakout DOWN, grade {{plot("Grade")}}')
+alertcondition(alTwBull, "Kumo twist - bull", 'MKumo {{ticker}} {{interval}}: Kumo twist BULL (projected cloud)')
+alertcondition(alTwBear, "Kumo twist - bear", 'MKumo {{ticker}} {{interval}}: Kumo twist BEAR (projected cloud)')
+alertcondition(alTouch, "Flat level touched", 'MKumo {{ticker}} {{interval}}: flat level touched')

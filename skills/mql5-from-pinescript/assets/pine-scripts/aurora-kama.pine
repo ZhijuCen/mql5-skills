@@ -1,0 +1,179 @@
+//@version=6
+strategy(
+     "Aurora KAMA Trend",
+     shorttitle          = "Aurora-KAMA",
+     overlay              = true,
+     initial_capital      = 10000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 25,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.05,
+     slippage              = 1,
+     pyramiding            = 1,
+     calc_on_order_fills   = false,
+     max_labels_count      = 500
+     )
+
+//#region --- Inputs ---
+
+string G1 = "KAMA Settings"
+float  src         = input.source(close, "Source",              group = G1)
+int    kamaLen     = input.int(10, "Efficiency Ratio Length", minval = 2, group = G1)
+int    fastLen     = input.int(2,  "Fast EMA Length",         minval = 1, group = G1)
+int    slowLen     = input.int(30, "Slow EMA Length",         minval = 1, group = G1)
+
+string G2 = "Trend Confirmation"
+int    risingLen   = input.int(3, "KAMA Rising Persistence (bars)",  minval = 1, group = G2)
+int    fallingLen  = input.int(3, "KAMA Falling Persistence (bars)", minval = 1, group = G2)
+bool   useSmaFilter = input.bool(true, "Use Long-Term Trend Filter", group = G2)
+int    smaLen       = input.int(200, "Trend Filter SMA Length",      group = G2)
+
+string G3 = "Trade Management"
+string direction    = input.string("Long and Short", "Trade Direction",
+     options = ["Long", "Short", "Long and Short"], group = G3)
+int    barsBetween  = input.int(5, "Minimum Bars Between Entries", minval = 0, group = G3)
+
+string G4 = "Risk Management"
+bool   useStop       = input.bool(true,  "Use Fixed Stop Loss %",   group = G4)
+float  stopPct       = input.float(4.0, "Stop Loss %", minval = 0.1, group = G4)
+bool   useTrail      = input.bool(true,  "Use Delayed Trailing Stop", group = G4)
+float  trailPct      = input.float(6.0, "Trailing Stop %",      minval = 0.1, group = G4)
+int    trailDelay    = input.int(5, "Delay Trailing by N Bars", minval = 0, group = G4)
+
+//#endregion
+
+
+//#region --- KAMA calculation ---
+
+// @function Kaufman's Adaptive Moving Average
+// @param source   Price series to smooth
+// @param len      Lookback used to calculate the Efficiency Ratio
+// @param fLen     Fastest EMA length, used when price is trending strongly
+// @param sLen     Slowest EMA length, used when price is choppy/noisy
+// @returns        The adaptive moving average value
+kama(float source, int len, int fLen, int sLen) =>
+    float change     = math.abs(source - source[len])
+    float volatility = math.sum(math.abs(source - source[1]), len)
+    float er         = volatility != 0 ? change / volatility : 0.0
+    float fastSC      = 2.0 / (fLen + 1)
+    float slowSC       = 2.0 / (sLen + 1)
+    float sc          = math.pow(er * (fastSC - slowSC) + slowSC, 2)
+    var float result  = na
+    result := na(result[1]) ? source : result[1] + sc * (source - result[1])
+    result
+
+float kamaVal = kama(src, kamaLen, fastLen, slowLen)
+float trendSma = ta.sma(close, smaLen)
+
+//#endregion
+
+
+//#region --- Signal logic ---
+
+bool kamaRising  = ta.rising(kamaVal, risingLen)
+bool kamaFalling = ta.falling(kamaVal, fallingLen)
+
+bool longTrendOk  = not useSmaFilter or close > trendSma
+bool shortTrendOk = not useSmaFilter or close < trendSma
+
+bool allowLong  = direction == "Long"  or direction == "Long and Short"
+bool allowShort = direction == "Short" or direction == "Long and Short"
+
+var int lastTradeBar = na
+bool cooldownOk = na(lastTradeBar) or (bar_index - lastTradeBar >= barsBetween)
+
+bool longSignal  = kamaRising  and longTrendOk  and allowLong  and cooldownOk
+bool shortSignal = kamaFalling and shortTrendOk and allowShort and cooldownOk
+
+//#endregion
+
+
+//#region --- Orders ---
+
+bool longEntry  = false
+bool shortEntry = false
+
+if longSignal and strategy.position_size <= 0
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+    lastTradeBar := bar_index
+    longEntry := true
+
+if shortSignal and strategy.position_size >= 0
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+    lastTradeBar := bar_index
+    shortEntry := true
+
+// --- Risk management: stop loss + delayed trailing stop ---
+bool  inPosition     = strategy.opentrades > 0
+int   barsInPosition = inPosition ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+bool  trailArmed     = inPosition and barsInPosition >= trailDelay
+
+float stopDist  = strategy.position_avg_price * stopPct  / 100
+float trailDist = strategy.position_avg_price * trailPct / 100
+
+if strategy.position_size > 0
+    strategy.exit(
+         "Exit Long", from_entry = "Long",
+         stop         = useStop  ? strategy.position_avg_price - stopDist  : na,
+         trail_points  = (useTrail and trailArmed) ? trailDist / syminfo.mintick : na,
+         trail_offset  = (useTrail and trailArmed) ? trailDist / syminfo.mintick : na
+         )
+
+if strategy.position_size < 0
+    strategy.exit(
+         "Exit Short", from_entry = "Short",
+         stop         = useStop  ? strategy.position_avg_price + stopDist  : na,
+         trail_points  = (useTrail and trailArmed) ? trailDist / syminfo.mintick : na,
+         trail_offset  = (useTrail and trailArmed) ? trailDist / syminfo.mintick : na
+         )
+
+// --- Close markers ---
+bool posJustClosed = strategy.position_size[1] != 0 and strategy.position_size == 0
+bool wasShort = strategy.position_size[1] < 0
+bool wasLong  = strategy.position_size[1] > 0
+
+bool closedFromShort = posJustClosed and wasShort
+bool closedFromLong  = posJustClosed and wasLong
+
+//#endregion
+
+
+//#region --- Visuals ---
+
+// KAMA line, colored by trend direction, with a red/green glow filling the
+// gap between KAMA and price. Glow intensity scales with the distance
+// between the two, so bigger separations glow brighter.
+color kamaColor = kamaRising ? #00e676 : kamaFalling ? #ff5252 : color.gray
+
+plotKama  = plot(kamaVal, "KAMA", color = kamaColor, linewidth = 2)
+plotClose = plot(close, "Close", display = display.none)
+
+fill(plotKama, plotClose, math.max(kamaVal, close), kamaVal,
+     color.new(#00e676, 80), color.new(#00e676, 60), title = "Bullish Glow")
+fill(plotKama, plotClose, kamaVal, math.min(kamaVal, close),
+     color.new(#ff5252, 60), color.new(#ff5252, 80), title = "Bearish Glow")
+
+// Long-term trend SMA rendered as a layered glow (stacked, semi-transparent
+// lines behind a crisp core line), colored gold when rising and amber when falling.
+float smaSlope     = ta.change(trendSma, 5)
+color smaCoreColor = useSmaFilter ? (smaSlope > 0 ? #ffd600 : smaSlope < 0 ? #ff9100 : #ffe082) : na
+
+plot(useSmaFilter ? trendSma : na, "SMA Glow Outer", color = color.new(smaCoreColor, 88), linewidth = 6)
+plot(useSmaFilter ? trendSma : na, "SMA Glow Mid",   color = color.new(smaCoreColor, 72), linewidth = 4)
+plot(useSmaFilter ? trendSma : na, "SMA Glow Inner",  color = color.new(smaCoreColor, 45), linewidth = 2)
+plot(useSmaFilter ? trendSma : na, "SMA Core",        color = smaCoreColor,               linewidth = 1)
+
+// Entry markers: triangles at long/short entries.
+// Exit markers: gray X's where a position was closed.
+plotshape(longEntry,  "Buy",  style = shape.triangleup,   location = location.belowbar,
+     color = #00e676, size = size.tiny)
+plotshape(shortEntry, "Sell", style = shape.triangledown, location = location.abovebar,
+     color = #ff5252, size = size.tiny)
+plotshape(closedFromLong,  "Exit Long",  style = shape.xcross, location = location.abovebar,
+     color = color.new(color.gray, 20), size = size.tiny)
+plotshape(closedFromShort, "Exit Short", style = shape.xcross, location = location.belowbar,
+     color = color.new(color.gray, 20), size = size.tiny)
+
+//#endregion
