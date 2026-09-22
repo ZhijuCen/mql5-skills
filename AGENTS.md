@@ -368,16 +368,21 @@ python skills/mql5/scripts/mql5_helper.py tester INI [OPTS]
 ```
 
 **init-ini** parses every `input`/`sinput` declaration in the `.mq5`
-source and writes a `[Tester]`/`[TesterInputs]` INI skeleton where each
-line is `name=default||start||step||stop||Y|N` (all inputs listed —
-omitted inputs silently fall back to EA source defaults).
+source and writes a `[Tester]`/`[TesterInputs]` INI skeleton. Each
+optimizable `input` line is `name=default||start||step||stop||Y|N`;
+`string` inputs and `sinput` (static input — never Grid/genetic
+optimized) are emitted as a BARE `name=value`, the MT5-native form
+(a `||tail` leaks into runtime string values). All inputs
+are listed — omitted ones fall back to the expert's last-used value if
+it ran before, else to the compiled source default (history-dependent).
 `--symbol/--period/--from/--to/--model/…` fill the `[Tester]` card;
 `--json` prints the parsed inputs; unresolvable enum/datetime
 defaults are kept verbatim with a `; TODO:` comment.
 
 **tester** runs a headless single Strategy Tester test **or Grid/genetic optimization**
 via `terminal64.exe /portable /config:<INI>`: validates the INI (required
-`[Tester]` keys, `UseLocal=1`, `[TesterInputs]` line format, `Expert=`
+`[Tester]` keys, `UseLocal=1`, `[TesterInputs]` line format (5-segment
+optimizer form or bare `name=value`), `Expert=`
 resolves to an existing `.ex5`), stages a normalized CRLF copy at a
 SPACE-FREE Windows path (`--stage-dir`, default: Wine drive root
 derived from `MT5_BASE`), refreshes the `.ex5` into the runner

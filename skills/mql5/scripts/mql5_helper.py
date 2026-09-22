@@ -26,9 +26,21 @@ the correct MQL5 sub-directory (Experts / Indicators / Scripts /
 Services) based on event functions found in the source code.
 
 init-ini parses every ``input`` / ``sinput`` declaration in the .mq5
-source and emits a [Tester]/[TesterInputs] INI skeleton where each
-line is ``name=default||start||step||stop||Y|N`` — inputs omitted
-from [TesterInputs] silently fall back to EA source defaults, so the
+source and emits a [Tester]/[TesterInputs] INI skeleton:
+
+* ``input`` (optimizable) → ``name=default||start||step||stop||Y|N``
+* ``string`` inputs and ``sinput`` (static input) declarations → a bare
+  ``name=value`` with no optimizer tail.  MT5 passes the raw right-hand
+  side of a ``[TesterInputs]`` line verbatim to string inputs, so a
+  ``||start||step||stop||Y|N`` tail would leak into the runtime value;
+  ``sinput`` is never enumerated by the optimizer (Grid or genetic), so
+  it takes a single fixed value only.  MT5's own client export writes
+  string inputs bare, and the MQL5 book documents that
+  ``sinput`` cannot be included in optimization.
+
+Inputs omitted from [TesterInputs] fall back to the expert's last-used
+value when that expert already ran in this instance, else to the
+compiled source default — history-dependent (GIGO trap), so the
 skeleton lists ALL of them.
 
 tester runs a Strategy Tester single test or optimization headlessly
@@ -654,8 +666,10 @@ def cmd_list(args: argparse.Namespace) -> int:
 #      (needs Bases\ + MQL5\; temp/logs/agent caches excludable).
 #   4. UseLocal=1 is REQUIRED or no local agent spawns and the run
 #      silently never starts.
-#   5. Every [TesterInputs] line must be name=value||start||step||stop||Y|N;
-#      omitted inputs silently fall back to EA source defaults.
+#   5. [TesterInputs] lines are name=value||start||step||stop||Y|N, or a
+#      bare name=value for string inputs and sinput (MT5-native form, no
+#      optimizer tail). Omitted inputs fall back to the
+#      expert's last-used value if it ran before, else the source default.
 #   6. Launch detached; completion = process exit + journal
 #      successful test/optimization journal + report file present.
 #      Optimization writes XML rather than HTML + PNGs. Poll, never sleep.
@@ -740,8 +754,28 @@ def _parse_ini_sections(text: str) -> dict[str, dict[str, str]]:
     return sections
 
 
+def _read_ini_text(path: Path) -> str:
+    """Read an INI text, sniffing a UTF-16 BOM.
+
+    The MT5 GUI exports configs as UTF-16LE + BOM while this helper
+    historically decoded UTF-8 only, so a native export failed with
+    ``no [Tester] section found``.  Both encodings are accepted on
+    read; the staged copy is always written as UTF-8.
+    """
+    raw = path.read_bytes()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", errors="replace")
+    return raw.decode("utf-8-sig", errors="replace")
+
+
 def _validate_tester_inputs_lines(lines: list[str]) -> list[str]:
-    """Return error strings for malformed [TesterInputs] lines (pitfall #5)."""
+    """Return error strings for malformed [TesterInputs] lines (pitfall #5).
+
+    Two shapes are legal: the 5-segment optimizer form
+    ``name=value||start||step||stop||Y|N`` and the bare ``name=value``
+    form MT5 itself writes for ``string`` inputs (and this helper for
+    ``sinput``) — no range, never optimized.
+    """
     errors: list[str] = []
     in_inputs = False
     for i, raw in enumerate(lines, 1):
@@ -755,10 +789,22 @@ def _validate_tester_inputs_lines(lines: list[str]) -> list[str]:
         if not in_inputs or not s or s.startswith(";"):
             continue
         parts = s.split("||")
-        if len(parts) != 5 or parts[4].strip().upper() not in ("Y", "N"):
+        if len(parts) == 5:
+            # Optimizer form: name=value||start||step||stop||Y|N
+            if parts[4].strip().upper() not in ("Y", "N"):
+                errors.append(
+                    f"  [TesterInputs] line {i}: {s!r} — must be "
+                    f"name=value||start||step||stop||Y|N or bare name=value"
+                )
+            continue
+        # Bare name=value (MT5-native for string inputs / sinput).  The
+        # value may itself contain "||", so only the 5-segment shape is
+        # held to the optimizer grammar.  Empty value is legal (empty
+        # string input); an empty name is not.
+        if "=" not in s or not s.partition("=")[0].strip():
             errors.append(
                 f"  [TesterInputs] line {i}: {s!r} — must be "
-                f"name=value||start||step||stop||Y|N"
+                f"name=value||start||step||stop||Y|N or bare name=value"
             )
     return errors
 
@@ -822,8 +868,8 @@ def _validate_tester_ini(
                 f"  [Tester] Expert={expert!r} — no such .ex5 under "
                 f"{MQL5_DIR / 'Experts'} (deploy first: mql5_helper.py deploy)"
             )
-    errors.extend(_validate_tester_inputs_lines(ini_path.read_text(
-        encoding="utf-8-sig", errors="replace").splitlines()))
+    errors.extend(_validate_tester_inputs_lines(
+        _read_ini_text(ini_path).splitlines()))
     return (errors, warnings)
 
 
@@ -1009,7 +1055,7 @@ def cmd_tester(args: argparse.Namespace) -> int:
     if not ini.is_file():
         print(f"Error: INI not found: {ini}")
         return 1
-    text = ini.read_text(encoding="utf-8-sig", errors="replace")
+    text = _read_ini_text(ini)
     sections = _parse_ini_sections(text)
     errors, warnings = _validate_tester_ini(ini, sections)
     for w in warnings:
@@ -1402,10 +1448,15 @@ def cmd_init_ini(args: argparse.Namespace) -> int:
     lines = [
         f"; Generated by mql5_helper.py init-ini from {src.name} "
         f"at {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        "; Every input is listed as name=value||start||step||stop||Y|N —",
-        "; inputs OMITTED from [TesterInputs] silently fall back to EA source",
-        "; defaults (GIGO trap). To optimize a parameter: set start/step/stop",
-        "; and flip the trailing N → Y, then set Optimization=1 for complete Grid.",
+        "; Optimizable input: name=value||start||step||stop||Y|N. string",
+        "; inputs and sinput (static input) are emitted BARE as name=value —",
+        "; no optimizer tail (MT5-native form: a tail would leak into a",
+        "; string value, and sinput is never optimized).",
+        "; Inputs OMITTED from [TesterInputs] fall back to the expert's",
+        "; last-used value if it ran before in this instance, else to the",
+        "; compiled source default (GIGO trap), so ALL are listed here.",
+        "; To optimize a parameter: set start/step/stop and flip the",
+        "; trailing N → Y, then set Optimization=1 for complete Grid.",
         "",
         "[Tester]",
         f"Expert={expert}",
@@ -1439,9 +1490,16 @@ def cmd_init_ini(args: argparse.Namespace) -> int:
         if inp["comment"]:
             lines.append(f"; {inp['comment']}")
         val, step = inp["value"], inp["step"]
-        lines.append(
-            f"{inp['name']}={val}||{val}||{step}||{val}||N"
-        )
+        if inp["type"].lower() == "string" or inp["sinput"]:
+            # Bare name=value — no start/step/stop and no Y|N flag:
+            #  * string: MT5 passes the raw RHS to the EA verbatim, so a
+            #    ||tail would leak into the runtime value; MT5's own
+            #    client export writes strings bare.
+            #  * sinput (static input): never enumerated by Grid/genetic
+            #    optimization — a single fixed value is all it takes.
+            lines.append(f"{inp['name']}={val}")
+        else:
+            lines.append(f"{inp['name']}={val}||{val}||{step}||{val}||N")
         if inp["todo"]:
             todos += 1
             lines.append(
@@ -1449,7 +1507,10 @@ def cmd_init_ini(args: argparse.Namespace) -> int:
                 "identifier; replace with the numeric enum/datetime value"
             )
         if inp["sinput"]:
-            lines.append(f"; note: {inp['name']} is sinput — never optimizable")
+            lines.append(
+                f"; note: {inp['name']} is sinput (static input) — bare "
+                "name=value, never optimized (no Grid range)"
+            )
     out.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-8"))
 
     print(f"Inputs parsed: {len(inputs)}  →  {out}")

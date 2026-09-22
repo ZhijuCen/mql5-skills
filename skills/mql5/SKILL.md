@@ -261,11 +261,11 @@ controls encoding, not by file extension.
 
 ### `.ini` Parameter Format (Optimization)
 
-`[TesterInputs]` uses `value||start||step||stop||Y` per line. **Field
-order is fixed** — moving `step` before `start`, or omitting the
-trailing `Y/N`, silently disables the parameter. Boolean / enum use
-`step=0` (only two values: `start` and `stop`). Example:
-`assets/Anonymous.XAUUSD.M15.ini`.
+Optimizable `input`: `value||start||step||stop||Y` per line, **field
+order fixed** — moving `step` before `start` or omitting the trailing
+`Y/N` silently disables the parameter; booleans/enums use `step=0`.
+`string` inputs and `sinput` (static input, never optimized) use a
+BARE `name=value`. Example: `assets/Anonymous.XAUUSD.M15.ini`.
 
 ### Backtesting Workflow
 

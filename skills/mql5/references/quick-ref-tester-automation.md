@@ -54,11 +54,23 @@ XAUUSD M15 2.4-year real-tick run ≈ 52–59 s.
    copy and rejects explicit `UseLocal=0`. For local-only optimization,
    also set `UseRemote=0` and `UseCloud=0` in the INI (no cloud charges).
 5. **`[TesterInputs]` format is mandatory even for single runs.**
-   `name=value||start||step||stop||Y|N`; booleans/enums use step 0.
-   Omitted inputs silently fall back to EA defaults. `tester` rejects
-   malformed lines; `init-ini` lists all declarations. For Grid, `Y`
-   selects the range, `N` keeps the value fixed. `sinput` is not
-   optimizable. Two values of one input × fixed others = **2 passes**.
+   Optimizable `input`: `name=value||start||step||stop||Y|N`;
+   booleans/enums use step 0. `string` inputs and `sinput` (static
+   input) take a **bare** `name=value` instead — MT5 passes the raw
+   right-hand side of a line to a string input verbatim, so a `||tail`
+   leaks into the runtime value, and MT5's own client export writes
+   strings bare; `sinput` is never enumerated by Grid/genetic search,
+   so it has one fixed value and no range/flag. `tester`
+   accepts both shapes and rejects anything else; `init-ini` lists all
+   declarations in the matching shape. Omitted inputs fall back to the
+   expert's last-used value if it already ran in this instance, else
+   the compiled source default. For Grid, `Y`
+   selects the range, `N` keeps the value fixed. Two values of one
+   input × fixed others = **2 passes**. Verified 2026-09-22 (build
+   6204): a bare line passes `tester --dry-run` (UTF-16 export too),
+   arrives verbatim at runtime, and a Grid with one `Y` range plus two
+   bare `sinput` finishes with exactly **2 passes** (no `sinput`
+   column in the XML).
 6. **Completion is mode-specific.** Require terminal exit
    (`ShutdownTerminal=1`), the successful test/optimization journal
    message, AND the correct report file. An HTML report from a single
