@@ -73,6 +73,21 @@ mql5-skills/
 │       │   └── analyze_signals_csv.py  # Positions CSV forensics (stdlib-only)
 │       └── references/
 │           └── signals-analysis.md  # Metric cheat sheet + red-flag taxonomy
+│   └── mql5-from-pinescript/  # Pine Script → MQL5 porting skill
+│       ├── SKILL.md           # Skill definition (agentskills.io spec)
+│       ├── scripts/
+│       │   ├── extract_pine.py  # pine-facade source fetch/check CLI
+│       │   └── fetch_pine_docs.py  # Pine docs excerpt fetcher (manual pages)
+│       ├── references/
+│       │   ├── pine-to-mql5.md               # Construct mapping + porting rules
+│       │   ├── pine-script-docs/             # Curated Pine doc excerpts (14+6, README=index)
+│       │   └── ports/                        # Port records 0001-0006 (D-numbered deviations)
+│       └── assets/
+│           ├── pine-scripts/   # Verbatim Pine sources ×6 (+PROVENANCE.md)
+│           ├── mql5/           # Ports 0001-0003 indicators; 0004-0006 strategy EAs
+│           │                   #   (+ strategy-common.mqh shared EA plumbing)
+│           └── mql5-side/      # Tester INIs (author-recommended assets) +
+│                               #   BufferDump-EA parity harness
 ├── jobs/                  # Backtest job folders
 │   ├── 250013-job.md      # Job specification
 │   └── ReportTester-250013/
@@ -352,6 +367,41 @@ chronological losing streak, holding pattern (≥N days — the "winners cut,
 losers held" dead-hang signature), recent window, and an auto `-- flagged --`
 block. Verified against signal 2271402 (1,860 deals, net within 0.2 of the
 page's 7,120.51) — see `references/signals-analysis.md` in `skills/mql-signals/`.
+
+### extract_pine.py
+
+Fetches the Pine Script source of a TradingView **open-source** script
+over plain HTTP (no login, no browser): the publication page HTML
+embeds `"script_id_part":"PUB;<hex>"`, and the `pine-facade` endpoint
+serves JSON with the raw `source`. CLI convention:
+
+```
+python skills/mql5-from-pinescript/scripts/extract_pine.py fetch PAGE_URL [-o FILE] [--json]
+python skills/mql5-from-pinescript/scripts/extract_pine.py fetch PAGE_URL --check FILE
+```
+
+`--check` LF-normalizes both sides and exits 0 (match) / 3 (mismatch) —
+use it to prove an archived `assets/pine-scripts/*.pine` still equals the
+published source. **Never** extract from the rendered code viewer: it
+renders spaces as U+00A0 and silently corrupts the file. Provenance for
+every archived source lives in a `PROVENANCE.md` next to it.
+
+Numeric parity harness (indicator ports): `assets/mql5-side/BufferDump-EA.mq5`
+exports OHLC + all buffers of a port via a headless tester run, and
+`scripts/check_0002_parity.py` recomputes the Pine semantics in Python
+column-by-column (see port record0002 for the report format).
+
+### fetch_pine_docs.py
+
+Re-fetches the **user-manual** half of `references/pine-script-docs/`
+(14 curated `/pine-script-docs/<section>/<page>/` HTML pages →
+markdown-ish excerpts via bs4). The API-reference half
+(`reference-*.md`, anchors `fun_*`/`var_*`/`const_*`) lives behind the
+JS-only `/pine-script-reference/v6/` shell and cannot be curled — those
+files are committed one-time browser-DOM extractions; the script only
+verifies their presence and documents the rebuild path (see the
+directory's `README.md`). Curation rule: excerpts are added only when a
+port actually needed them — never mirror the full doc set.
 
 ### mql5_helper.py
 
