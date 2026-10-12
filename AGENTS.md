@@ -73,7 +73,7 @@ mql5-skills/
 │       │   └── analyze_signals_csv.py  # Positions CSV forensics (stdlib-only)
 │       └── references/
 │           └── signals-analysis.md  # Metric cheat sheet + red-flag taxonomy
-│   └── mql5-from-pinescript/  # Pine Script → MQL5 porting skill
+│   ├── mql5-from-pinescript/  # Pine Script → MQL5 porting skill
 │       ├── SKILL.md           # Skill definition (agentskills.io spec)
 │       ├── scripts/
 │       │   ├── extract_pine.py  # pine-facade source fetch/check CLI
@@ -88,6 +88,16 @@ mql5-skills/
 │           │                   #   (+ strategy-common.mqh shared EA plumbing)
 │           └── mql5-side/      # Tester INIs (author-recommended assets) +
 │                               #   BufferDump-EA parity harness
+│   └── mql5-code-review/     # Static EA source review skill
+│       ├── SKILL.md           # 4-phase review process + severity labels + rule table
+│       ├── scripts/
+│       │   └── mql5_redflags.py  # Regex red-flag scanner (19 rules, --json/-o)
+│       ├── references/        # 8 dimension guides (trading-logic, indicators,
+│       │                       #   failure-modes, diagnostics-numeric, performance,
+│       │                       #   tester-live-parity, gui-ux, common-bugs)
+│       └── assets/
+│           ├── review-checklist.md       # Quick per-dimension checklist
+│           └── review-report-template.md # Copy-fill review report (EN)
 ├── jobs/                  # Backtest job folders
 │   ├── 250013-job.md      # Job specification
 │   └── ReportTester-250013/
