@@ -96,7 +96,12 @@ XAUUSD M15 2.4-year real-tick run ≈ 52–59 s.
 ## 2. `[Tester]` Optimization and Model enums
 
 Source: [MetaTrader 5 — Platform Start, configuration-file parameters](https://www.metatrader5.com/en/terminal/help/start_advanced/start#configuration_file).
-These are **INI numeric values**, not GUI row indices.
+These are **INI numeric values**, not GUI row indices. For EA input
+enums (`ENUM_TIMEFRAMES`, `ENUM_APPLIED_PRICE`, order/deal types, …)
+and their numeric values in `[TesterInputs]`/`.set`, see
+`quick-ref-enum-values.md` — an invalid timeframe can stall the run
+while it tries to sync non-existent history instead of reporting an
+error.
 
 ### Optimization — all values
 

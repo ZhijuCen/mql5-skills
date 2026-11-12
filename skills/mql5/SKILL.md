@@ -492,7 +492,7 @@ Copy to `MQL5/Experts/` (under your terminal tree), `#include
   - `quick-ref-mql5-economic-calendar.md` — `MqlCalendarValue` 128-byte layout, `#resource` pitfalls.
   - `quick-ref-shadow-parameter-optimization.md` — shadow parameter compression (combo index).
   - `quick-ref-tester-deal-debug.md` — 6-step deal-level methodology for tester HTML.
-  - `quick-ref-tester-automation.md` — headless `tester` recipe, pitfall list, Model enum.
+  - `quick-ref-tester-automation.md` — headless `tester` recipe, pitfall list, Model enum; `quick-ref-enum-values.md` — numeric enum values for `*.ini`/`*.set` (timeframe trap, applied price, trade enums).
   - `quick-ref-optimizer-analysis.md` — env-card, dead params, `outliers`, `failures`.
 - **Book / API** (`references/`): `book/` (581-pg learning path; chapters `00-intro/` … `06-advanced/`); `docs/` (4135-pg API; top folders `19-trading/`, `16-series/`, `26-indicators/`, `24-customind/`, `13-event-handlers/`, `34-standardlibrary/`, `01-constants/`); `symbol-spec/specs-XAUUSD.csv`, `specs-USDJPY.csv`.
 - **Scripts** (`scripts/`): `parse_tester_report.py` (`report`/`analyze`/`windows`); `parse_optimizer_report.py` (`report`/`analyze`/`outliers`/`failures`); `parse_mql_calendar_bin.py` (positional PATH); `verify_sl_tp_formulas.py verify [SYMBOL ...]`; `mql5_helper.py` (`compile`/`check`/`deploy`/`status`/`list`/`init-ini`/`tester`).
