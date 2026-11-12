@@ -33,10 +33,14 @@ mql5-skills/
 ├── skills/
 │   ├── mql5/              # The MQL5 development skill
 │       ├── SKILL.md       # Skill definition (agentskills.io spec)
+│       ├── assets/
+│       │   ├── templates/     # EA/Indicator/Script skeletons
+│       │   └── tester/        # complex-criterion-probe.mq5 (CC calibration probe)
 │       ├── scripts/
 │       │   ├── mql5_helper.py            # Compile/deploy/init-ini/tester/status via Wine
 │       │   ├── parse_tester_report.py    # Backtest report parser + analysis
 │       │   ├── parse_optimizer_report.py # Optimization report parser + analysis
+│       │   ├── complex_criterion.py      # Complex Criterion (OptimizationCriterion=7) model
 │       │   └── verify_sl_tp_formulas.py  # SL/TP risk formula verification
 │       └── references/
 │           ├── book/      # Programming book markdown (from sitemap_book_en.xml)
@@ -353,6 +357,42 @@ detected by **column position** — every column after `Trades` is an
 optimization input, regardless of whether its name starts with
 `Inp`. So an EA naming its params `StopLoss` / `TakeProfit` /
 `UseNewsFilter` parses correctly without script changes.
+
+### complex_criterion.py
+
+Computes MT5's Strategy Tester **Complex Criterion**
+(`OptimizationCriterion=7`, the `Result` column of an optimization) from a
+report. MetaQuotes does not publish the formula; this script implements the
+reverse-engineered model documented in
+`skills/mql5/references/quick-ref-complex-criterion.md`:
+
+```
+cc = 100 * sigma((T-40)/5) * (0.2*sigma((20-DD_eq_pct)/2.5) + Qo)
+Qo = 0.0335 + G_rf(RF) + G_sr(SR) + G_pf(PF) + G_wr(win_rate)
+```
+
+Three sub-commands:
+
+```
+# single-test HTML report -> one number (2 decimals, rounded)
+python skills/mql5/scripts/complex_criterion.py report ReportTester-1234567.html
+
+# optimizer XML -> per-pass table (the XML has no win/loss counts)
+python skills/mql5/scripts/complex_criterion.py xml ReportOptimizer-*.xml [--limit N]
+
+# model accuracy against MT5's own Result column
+python skills/mql5/scripts/complex_criterion.py validate ReportOptimizer-*.xml
+
+# all sub-commands accept --json and -o FILE
+```
+
+Measured accuracy (2026-11-12, MT5 build 6230): single-test reports with
+win/loss counts → median |error| **0.21** points (p90 0.76); optimizer XML,
+which lacks the win/loss split → median **0.77** (p90 4.6). The trades and
+equity-drawdown factors are exact; the four quality tables are calibrated.
+`assets/tester/complex-criterion-probe.mq5` dumps
+`STAT_COMPLEX_CRITERION` at full precision for re-calibration or when an
+exact value is required.
 
 ### analyze_signals_csv.py
 

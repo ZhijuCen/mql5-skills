@@ -346,20 +346,23 @@ server, wrong leverage, or stale build invalidates the run.
 ### Per-Pass Outlier Scan (`outliers`)
 
 Per-pass z-score over the 8 perf metrics (Result, Profit, EP, PF,
-RF, SR, Custom, Equity DD %). Trades excluded from the scan; used
-only as a low-Trades filter. Two disjoint sets sorted by `--sort`
-priority (default `R↓, EP↓, PF↓, RF↓, SR↓, P↓, DD↑, C↓, T↓`).
-Full table + sigma guidance:
+RF, SR, Custom, Equity DD %); Trades only as a low-count filter. Sorted
+by `--sort` (default `R↓, EP↓, PF↓, RF↓, SR↓, P↓, DD↑, C↓, T↓`):
 `references/quick-ref-optimizer-analysis.md` §9.
 
 #### Failure-Set Analysis (`failures`)
 
 Passes satisfying **any** of 6 absolute criteria (Profit<0, PF<1.0,
-EP<0.1, Equity DD%>60, RF<1, SR<1.0). Thresholds NOT z-scored —
-satisfying every criterion = deployment-grade on absolute terms.
-Per parameter, `pct_of_global` > 50% on a single value = smoking
-gun; drop it from the grid or fix as a fundamental EA bug. Output:
-`references/quick-ref-optimizer-analysis.md` §10.
+EP<0.1, Equity DD%>60, RF<1, SR<1.0) — not z-scored. Per parameter,
+`pct_of_global` > 50% on one value = smoking gun; drop it from the grid
+or fix as an EA bug: `references/quick-ref-optimizer-analysis.md` §10.
+
+### Complex Criterion (`OptimizationCriterion=7`)
+
+Optimization `Result` column = MT5's undocumented 0–100 quality score
+(exact trades + equity-DD factors, calibrated quality sum); formula,
+accuracy limits, probe EA, `scripts/complex_criterion.py` — see
+`references/quick-ref-complex-criterion.md`.
 
 ### News-Aware Backtesting (`#resource`)
 
@@ -485,15 +488,13 @@ Copy to `MQL5/Experts/` (under your terminal tree), `#include
 ## 10. References
 
 - **Templates** (`assets/templates/`):
-  - `ea-skeleton.mq5` — minimal EA scaffold (CTrade + risk-based SL/TP + magic isolation).
-  - `risk-helpers.mqh` — `PointValue`, `FindFXRate`, `CalcSLFromRisk`, `CalcLotsFromSL`.
+  - `ea-skeleton.mq5` — minimal EA scaffold (CTrade + risk-based SL/TP + magic isolation); `risk-helpers.mqh` — `PointValue`, `FindFXRate`, `CalcSLFromRisk`, `CalcLotsFromSL`.
   - `assets/mql5.com-artical-22196-MetaQuotes/` — article 22196 source (export + validation EAs). `outputs/` gitignored.
 - **Quick-refs** (`references/`):
   - `quick-ref-mql5-economic-calendar.md` — `MqlCalendarValue` 128-byte layout, `#resource` pitfalls.
-  - `quick-ref-shadow-parameter-optimization.md` — shadow parameter compression (combo index).
-  - `quick-ref-tester-deal-debug.md` — 6-step deal-level methodology for tester HTML.
+  - `quick-ref-shadow-parameter-optimization.md` — shadow param compression (combo index); `quick-ref-tester-deal-debug.md` — 6-step deal-level methodology.
   - `quick-ref-tester-automation.md` — headless `tester` recipe, pitfall list, Model enum; `quick-ref-enum-values.md` — numeric enum values for `*.ini`/`*.set` (timeframe trap, applied price, trade enums).
-  - `quick-ref-optimizer-analysis.md` — env-card, dead params, `outliers`, `failures`.
+  - `quick-ref-optimizer-analysis.md` — env-card, dead params, `outliers`, `failures`; `quick-ref-complex-criterion.md` — Complex Criterion formula/accuracy.
 - **Book / API** (`references/`): `book/` (581-pg learning path; chapters `00-intro/` … `06-advanced/`); `docs/` (4135-pg API; top folders `19-trading/`, `16-series/`, `26-indicators/`, `24-customind/`, `13-event-handlers/`, `34-standardlibrary/`, `01-constants/`); `symbol-spec/specs-XAUUSD.csv`, `specs-USDJPY.csv`.
-- **Scripts** (`scripts/`): `parse_tester_report.py` (`report`/`analyze`/`windows`); `parse_optimizer_report.py` (`report`/`analyze`/`outliers`/`failures`); `parse_mql_calendar_bin.py` (positional PATH); `verify_sl_tp_formulas.py verify [SYMBOL ...]`; `mql5_helper.py` (`compile`/`check`/`deploy`/`status`/`list`/`init-ini`/`tester`).
+- **Scripts** (`scripts/`): `parse_tester_report.py` (`report`/`analyze`/`windows`); `parse_optimizer_report.py` (`report`/`analyze`/`outliers`/`failures`); `complex_criterion.py` (`report`/`xml`/`validate`); `parse_mql_calendar_bin.py` (positional PATH); `verify_sl_tp_formulas.py verify [SYMBOL ...]`; `mql5_helper.py` (`compile`/`check`/`deploy`/`status`/`list`/`init-ini`/`tester`).
 - **External**: [MQL5 Reference](https://www.mql5.com/en/docs), [MQL5 Book](https://www.mql5.com/en/book), [Strategy Tester Guide](https://www.mql5.com/en/terminal/strategytester).
