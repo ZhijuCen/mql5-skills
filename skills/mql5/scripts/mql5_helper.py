@@ -9,17 +9,20 @@ Supports Windows 10+ natively (PowerShell) and Linux/Wine.
 Paths are NEVER auto-detected.  MT5_BASE / MQL5_DIR / WINE_DISK_ROOT
 are resolved in this order:
 
-1. the project ``.env`` file (walk-up from cwd, e.g.
-   ``$PROJECT_ROOT/.env``; ``--env-file PATH`` overrides the search,
-   ``--no-env`` disables .env loading entirely),
+1. the project ``.env`` file (walk-up from cwd, then from the script
+   directory, e.g. ``$PROJECT_ROOT/.env``; ``--env-file PATH``
+   overrides the search, ``--no-env`` disables .env loading entirely),
 2. the real environment variables.
 
 In other words ``.env`` WINS over a pre-existing ``$MT5_BASE`` /
-``$MQL5_DIR`` — the project file is the single source of truth.
-WINE_DISK_ROOT is required on Unix (Linux/macOS) only — the drive
-letter that maps to ``/`` under Wine (e.g. ``Z``); it is ignored on
-Windows.  ``tester`` additionally requires an explicit ``--instance``
-runner directory: there is no guessed default.
+``MQL5_DIR``: the project file is the single source of truth.
+The MT5 programs are taken from that configuration only —
+``MT5_BASE/MetaEditor64.exe`` and ``MT5_BASE/terminal64.exe``, never
+from a directory scan.  A missing ``MT5_BASE`` directory or a missing
+program inside it is a hard error (exit 1) naming what is missing,
+instead of a confusing downstream compile/launch failure.  Wine itself
+is simply the ``wine`` binary on PATH.  WINE_DISK_ROOT is required on
+Unix (Linux/macOS) only and ignored on Windows.
 
 Usage:
     python skills/mql5/scripts/mql5_helper.py compile FILE.mq5
@@ -55,10 +58,10 @@ skeleton lists ALL of them.
 tester runs a Strategy Tester single test or optimization headlessly
 (Optimization=0: single; 1: complete Grid; 2: genetic; 3: Market Watch).
 It validates and normalizes the INI, stages it at a space-free Windows path,
-launches the terminal against a dedicated runner instance (cloned
-from MT5_BASE on first use, so the user's GUI terminal is not
-disturbed), polls process exit + journal + report, copies the report
-artifacts to -o OUTDIR and prints the parsed summary.  Pitfall list
+launches ``MT5_BASE/terminal64.exe`` in place (nothing is copied or
+cloned — the install named by MT5_BASE is the runner), polls process
+exit + journal + report, copies the report artifacts to -o OUTDIR and
+prints the parsed summary.  Pitfall list
 and observed error strings: references/quick-ref-tester-automation.md.
 """
 
@@ -66,6 +69,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -90,7 +94,8 @@ TYPE_DIRS: dict[str, str] = {
 IS_WINDOWS = sys.platform == "win32"
 
 # Variables loaded from the environment / project-root .env.
-# WINE_DISK_ROOT is required on Unix only (Windows ignores it).
+# WINE_DISK_ROOT is required on Unix only (Windows ignores it);
+# MetaEditor64.exe and terminal64.exe are resolved under MT5_BASE.
 _ENV_KEYS = ("MT5_BASE", "MQL5_DIR", "WINE_DISK_ROOT")
 
 
@@ -100,8 +105,10 @@ def _load_env(env_path: Optional[Path] = None) -> None:
     *env_path* — optional explicit path (``--env-file``).  When given,
     that file must exist (raises ``SystemExit(1)`` on missing or
     unreadable).  When ``None`` (default), walks up from ``Path.cwd()``
-    and uses the first ``.env`` it finds (silent on miss — values may
-    still come from the real environment).
+    and, failing that, from this script's directory — so ``status`` /
+    ``compile`` / ``tester`` read the project ``.env`` no matter which
+    cwd invoked them.  A miss is silent: values may still come from the
+    real environment.
 
     Supports ``KEY="VALUE" KEY2="VALUE2"`` on one line (space-separated),
     one-var-per-line, or mixes thereof, using ``shlex.split`` for quoting.
@@ -120,16 +127,22 @@ def _load_env(env_path: Optional[Path] = None) -> None:
             sys.exit(1)
         candidates.append(env_path)
     else:
-        d = Path.cwd()
-        while True:
-            ef = d / ".env"
-            if ef.is_file():
-                candidates.append(ef)
+        # Walk up from cwd first (a project-local .env wins), then from
+        # the script directory so the shipped project .env is found even
+        # when the command is run from an unrelated cwd.
+        for start in (Path.cwd(), Path(__file__).resolve().parent):
+            d = start
+            while True:
+                ef = d / ".env"
+                if ef.is_file():
+                    candidates.append(ef)
+                    break
+                parent = d.parent
+                if parent == d:
+                    break
+                d = parent
+            if candidates:
                 break
-            parent = d.parent
-            if parent == d:
-                break
-            d = parent
 
     for ef in candidates:
         try:
@@ -137,19 +150,20 @@ def _load_env(env_path: Optional[Path] = None) -> None:
         except OSError as e:
             print(f"Error: cannot read {ef}: {e}")
             sys.exit(1)
-        import shlex
-
-        # comments=True: a `#` line is a comment, so a commented-out
-        # `# MQL5_DIR=/old/path` can never win over the active line.
-        for token in shlex.split(text, comments=True):
-            if "=" not in token:
-                continue
-            idx = token.index("=")
-            key = token[:idx]
-            val = token[idx + 1 :]
-            if key in _ENV_KEYS:
-                # .env wins over a pre-exported variable (documented order).
-                os.environ[key] = val
+        for line in text.splitlines():
+            # Parse per line: a file without a trailing newline used to
+            # glue the last two assignments into one token.  comments=True
+            # drops a `#` line (and trailing `# ...`), so a commented-out
+            # `# MQL5_DIR=/old/path` can never win over the active line.
+            for token in shlex.split(line, comments=True):
+                if "=" not in token:
+                    continue
+                idx = token.index("=")
+                key = token[:idx].strip()
+                val = token[idx + 1 :]
+                if key in _ENV_KEYS:
+                    # .env wins over a pre-exported variable (documented order).
+                    os.environ[key] = val
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +245,20 @@ def _to_editor_path(path: Path) -> str:
     # Absolute path with forward slashes, prefixed by the drive letter
     # and a double slash:  Z://home/user/...
     return f"{drive}://{path.as_posix().removeprefix('/')}"
+
+
+def _require_mt5_dir() -> Optional[Path]:
+    """Return ``MT5_BASE`` when it is an existing directory, else None.
+
+    The message separates the two failure modes that need different
+    fixes: the configured install directory is missing (fix ``.env``)
+    versus a program missing inside it (install / deploy it).
+    """
+    if MT5_BASE.is_dir():
+        return MT5_BASE
+    print(f"Error: MT5_BASE does not exist: {MT5_BASE}")
+    print("  Fix MT5_BASE in the project-root `.env`.")
+    return None
 
 
 def _build_editor_cmd(editor: Path, flags: list[str]) -> list[str]:
@@ -348,12 +376,30 @@ def resolve_type(src: Path) -> str:
 
 
 def _find_editor() -> Optional[Path]:
-    """Locate ``MetaEditor64.exe`` in MT5_BASE."""
+    """Return the MetaEditor executable under ``MT5_BASE``, or None."""
     for name in ("MetaEditor64.exe", "MetaEditor.exe"):
         p = MT5_BASE / name
         if p.is_file():
             return p
     return None
+
+
+def _require_editor() -> Path:
+    """Return MetaEditor from ``MT5_BASE`` or exit with an error.
+
+    The editor is never searched for elsewhere: ``MT5_BASE`` (from the
+    project ``.env`` or the environment) is the only source, and a
+    missing install or executable is a hard error instead of a
+    confusing downstream compile failure.
+    """
+    if _require_mt5_dir() is None:
+        sys.exit(1)
+    editor = _find_editor()
+    if editor is None:
+        print(f"Error: MetaEditor64.exe not found in MT5_BASE: {MT5_BASE}")
+        print("  Check MT5_BASE in the project-root `.env`.")
+        sys.exit(1)
+    return editor
 
 
 # ---------------------------------------------------------------------------
@@ -379,14 +425,12 @@ def _check_timestamps(
 
     if expect_ex5:
         if ex5_path.exists() and ex5_path.stat().st_mtime > t_before:
-            elapsed = time.time() - ex5_path.stat().st_mtime
             print(f"  ✓ {ex5_path}  ({ex5_path.stat().st_mtime - t_before:.1f}s after start)")
         else:
             what = "not found" if not ex5_path.exists() else "stale (mtime before compile)"
             issues.append(f"  ✗ {ex5_path} — {what}")
 
     if log_path.exists() and log_path.stat().st_mtime > t_before:
-        elapsed = time.time() - log_path.stat().st_mtime
         print(f"  ✓ {log_path}  ({log_path.stat().st_mtime - t_before:.1f}s after start)")
     else:
         what = "not found" if not log_path.exists() else "stale (mtime before compile)"
@@ -445,10 +489,7 @@ def _run_editor(src: Path, extra_flags: list[str], *, expect_ex5: bool) -> int:
         print(f"Error: {src} not found")
         return 1
 
-    editor = _find_editor()
-    if editor is None:
-        print(f"Error: MetaEditor.exe not found in {MT5_BASE}")
-        return 1
+    editor = _require_editor()
 
     # Pre-remove stale outputs so they can't fake freshness
     t_before = time.time()
@@ -490,9 +531,9 @@ def _run_editor(src: Path, extra_flags: list[str], *, expect_ex5: bool) -> int:
             )
     except FileNotFoundError:
         if IS_WINDOWS:
-            print(f"Error: {cmd[0]} not found on PATH. Verify MT5 installation.")
+            print(f"Error: {cmd[0]} not found. Check MT5_BASE in the project `.env`.")
         else:
-            print("Error: wine not found. Install wine or run on Windows.")
+            print(f"Error: {cmd[0]} not found. Install Wine or run on Windows.")
         return 1
     except subprocess.TimeoutExpired:
         print("Compile timed out (60s).")
@@ -615,7 +656,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Show MT5 / MQL5 environment status."""
     platform_label = "Windows (native)" if IS_WINDOWS else "Linux (Wine)"
-    print(f"MQL5 Helper — Status")
+    print("MQL5 Helper — Status")
     print(f"  Platform:      {platform_label}")
     print(f"  MT5 Base:      {MT5_BASE}")
     print(f"  MQL5 Dir:      {MQL5_DIR}")
@@ -630,21 +671,17 @@ def cmd_status(args: argparse.Namespace) -> int:
                 print(f"    {subdir:12s}: {len(mq5)} .mq5, {len(ex5)} .ex5")
 
     editor = _find_editor()
-    if editor:
-        print(f"  Editor:        {editor}")
-        print(f"    Exists:      ✓")
-    else:
-        print(f"  Editor:        (not found in {MT5_BASE})")
-
-    print(f"  Terminal:      {MT5_BASE / 'terminal64.exe'}")
-    print(f"    Exists:      {(MT5_BASE / 'terminal64.exe').exists()}")
+    print(f"  Editor:        {editor or f'MISSING under {MT5_BASE}'}")
+    terminal = MT5_BASE / "terminal64.exe"
+    print(f"  Terminal:      {terminal}")
+    print(f"    Exists:      {terminal.is_file()}")
 
     print()
     if IS_WINDOWS:
         print("  PowerShell compile template:")
         print(f'    & "{editor or MT5_BASE / "MetaEditor64.exe"}" /compile:"path\\to\\file.mq5" /log')
     else:
-        drive = os.environ.get("WINE_DISK_ROOT", "").strip().rstrip(":")
+        drive = os.environ.get("WINE_DISK_ROOT", "").strip().rstrip(":") or "<WINE_DISK_ROOT>"
         print("  Wine compile template (WINE_DISK_ROOT drive letter + double forward slash):")
         print(f'    wine "{editor or MT5_BASE / "MetaEditor64.exe"}" /compile:"{drive}://home/USER/path/to/file.mq5" /log')
     return 0
@@ -680,9 +717,10 @@ def cmd_list(args: argparse.Namespace) -> int:
 #   2. /config:<path> must be a Windows-style ABSOLUTE path and
 #      SPACE-FREE — a quoted path with spaces makes the terminal log
 #      `cannot load config "..."` and boot as a plain GUI.
-#   3. Single-instance lock: run against a dedicated cloned instance.
-#      There is no default instance path — ``--instance`` is required
-#      (needs Bases\ + MQL5\; temp/logs/agent caches excludable).
+#   3. Single-instance lock: the install named by MT5_BASE IS the
+#      runner. Nothing is copied or cloned; close any GUI terminal on
+#      that install before a headless run, or the lock makes the launch
+#      hang/fail far from the cause.
 #   4. UseLocal=1 is REQUIRED or no local agent spawns and the run
 #      silently never starts.
 #   5. [TesterInputs] lines are name=value||start||step||stop||Y|N, or a
@@ -946,31 +984,6 @@ def _normalize_tester_ini_text(
     return out
 
 
-def _clone_ignore(directory, names):
-    """shutil.copytree ignore fn: skip temp/logs and Tester agent caches."""
-    d = Path(directory)
-    ignored: set[str] = set()
-    if d == MT5_BASE:
-        ignored |= {"temp", "logs"}
-    if d.name.lower() == "tester":
-        ignored |= {
-            n for n in names
-            if n.startswith("Agent-") or n.lower() in ("cache", "logs")
-        }
-    return ignored
-
-
-def _ensure_instance(instance: Path) -> None:
-    """Bootstrap a runner instance by cloning MT5_BASE (pitfall #3)."""
-    if (instance / "terminal64.exe").is_file():
-        return
-    print(f"Runner instance not found: {instance}")
-    print(f"Cloning {MT5_BASE} → {instance}")
-    print("  (Bases\\ can be several GB; temp/logs/Tester agent caches excluded)")
-    shutil.copytree(MT5_BASE, instance, ignore=_clone_ignore, dirs_exist_ok=True)
-    print("  clone done")
-
-
 def _read_maybe_utf16(path: Path) -> str:
     """Read a log file, decoding UTF-16LE when BOM/NUL pattern present."""
     return _read_journal_since(path, 0)
@@ -993,12 +1006,24 @@ def _read_journal_since(path: Path, byte_offset: int = 0) -> str:
     return text[byte_offset:]
 
 
-def _newest_journal(instance: Path, since: float) -> Optional[Path]:
-    """Newest instance/logs/*.log modified after *since* (epoch sec)."""
-    logs = instance / "logs"
+# Terminal journal names are YYYYMMDD.log.  Anything else in logs/ (e.g.
+# metaeditor.log, written when the EA is compiled) is NOT a terminal
+# journal: mistaking it for one throws away the byte baseline and makes
+# the day's stale journal lines look like this run's evidence.
+_JOURNAL_RE = re.compile(r"\d{8}\.log", re.IGNORECASE)
+
+
+def _journal_files(run_dir: Path) -> list[Path]:
+    """Return the terminal journals (``YYYYMMDD.log``) under run_dir/logs."""
+    logs = run_dir / "logs"
     if not logs.is_dir():
-        return None
-    hits = [p for p in logs.glob("*.log") if p.stat().st_mtime >= since - 5]
+        return []
+    return [p for p in logs.glob("*.log") if _JOURNAL_RE.fullmatch(p.name)]
+
+
+def _newest_journal(run_dir: Path, since: float) -> Optional[Path]:
+    """Newest terminal journal modified after *since* (epoch sec)."""
+    hits = [p for p in _journal_files(run_dir) if p.stat().st_mtime >= since - 5]
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 
@@ -1028,9 +1053,9 @@ def _journal_key_lines(text: str) -> list[str]:
 
 
 def _locate_report(
-    instance: Path, report_name: str, since: float, *, optimization: bool = False
+    run_dir: Path, report_name: str, since: float, *, optimization: bool = False
 ) -> Optional[Path]:
-    """Find HTML (single test) or XML (optimization) in the instance root.
+    """Find HTML (single test) or XML (optimization) in the run root.
 
     Prefer the Report= stem, then MT5's ReportTester-/ReportOptimizer-
     fallback; never collect an unrelated file or a forward report.
@@ -1043,7 +1068,7 @@ def _locate_report(
 
     suffixes = {".xml"} if optimization else {".htm", ".html"}
     stem = re.sub(r"\.(?:xml|html?)$", "", report_name, flags=re.IGNORECASE)
-    cands = [p for p in instance.iterdir()
+    cands = [p for p in run_dir.iterdir()
              if p.is_file() and p.suffix.lower() in suffixes and _newer(p)]
     named = [p for p in cands if p.stem == stem]
     prefix = "ReportOptimizer-" if optimization else "ReportTester-"
@@ -1089,70 +1114,22 @@ def cmd_tester(args: argparse.Namespace) -> int:
     optimization = optimization_mode != "0"
     print(f"Tester mode: {OPTIMIZATION_ENUM[optimization_mode]}")
     expert_rel = tester["Expert"].replace("\\", "/")
-    host_ex5 = _resolve_expert_host(tester["Expert"])
-    assert host_ex5 is not None  # validated above
     ea_stem = Path(expert_rel).stem
     ts = time.strftime("%Y%m%d-%H%M%S")
     report_name = args.report_name or f"{ea_stem}-{ts}"
 
-    # --- runner instance (pitfall #3) ------------------------------------
-    # No default instance directory: a guessed path (e.g. "MetaTrader
-    # 5-auto" next to MT5_BASE) silently lands on a directory the user's
-    # GUI/auto terminal may already own, trips the single-instance lock,
-    # and reports a confusing journal/launch failure far from the cause.
-    # Fail loudly here instead.
-    if not args.instance:
-        print(
-            "Error: --instance DIR is required (dedicated headless runner "
-            "directory)."
-        )
-        print(
-            "  There is no default: pass a directory next to the install that "
-            "no interactive terminal uses,"
-        )
-        print(
-            "  e.g. --instance \"…/MetaTrader 5-runner\" (cloned from MT5_BASE "
-            "on first use)."
-        )
+    # --- runner: the MT5 install named by MT5_BASE (no copy) ------------
+    # The install IS the runner: nothing is cloned or copied.  Its paths
+    # come from the project `.env` / environment only — a missing
+    # terminal is a hard error, never a search.
+    if _require_mt5_dir() is None:
         return 1
-    instance = Path(args.instance).resolve()
-    base = MT5_BASE.resolve()
-    if instance == base or base in instance.parents or instance in base.parents:
-        print(
-            f"Error: --instance must be a separate directory, not {instance} "
-            f"(overlaps MT5_BASE {base})."
-        )
-        print(
-            "  Cloning the install into itself recurses, and reusing the "
-            "GUI install trips the single-instance lock."
-        )
+    run_dir = MT5_BASE.resolve()
+    terminal = run_dir / "terminal64.exe"
+    if not terminal.is_file():
+        print(f"Error: terminal64.exe not found in MT5_BASE: {run_dir}")
+        print("  Check MT5_BASE in the project-root `.env`.")
         return 1
-    terminal = instance / "terminal64.exe"
-    if not IS_WINDOWS:
-        if not shutil.which(args.wine):
-            print(f"Error: wine binary not found: {args.wine}")
-            return 1
-    if not terminal.is_file() and args.dry_run:
-        print(
-            f"Dry run — instance {instance} missing; would be cloned from "
-            f"{MT5_BASE} (skipped in dry run)."
-        )
-    else:
-        _ensure_instance(instance)
-        if not terminal.is_file():
-            print(f"Error: terminal64.exe not found in instance: {terminal}")
-            return 1
-
-    # --- refresh the freshly-compiled .ex5 into the instance --------------
-    if args.no_refresh:
-        print("Skipping .ex5 refresh (--no-refresh)")
-    elif args.dry_run and not terminal.is_file():
-        print("Dry run — .ex5 refresh skipped (instance not bootstrapped)")
-    else:
-        inst_ex5 = instance / "MQL5" / "Experts" / expert_rel
-        inst_ex5.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(host_ex5, inst_ex5)
-        print(f"Refreshed .ex5: {host_ex5.name} → {inst_ex5}")
 
     # --- stage the normalized INI at a space-free Windows path -----------
     stage_dir = Path(args.stage_dir).resolve() if args.stage_dir else _default_stage_dir()
@@ -1181,12 +1158,10 @@ def cmd_tester(args: argparse.Namespace) -> int:
     print(f"Staged INI: {staged}  (as {win_cfg})")
 
     # --- launch command ---------------------------------------------------
-    if IS_WINDOWS:
-        cmd = [str(terminal), "/portable", f"/config:{win_cfg}"]
-    else:
-        cmd = [args.wine, str(terminal), "/portable", f"/config:{win_cfg}"]
+    cmd = [str(terminal)] if IS_WINDOWS else ["wine", str(terminal)]
+    cmd += ["/portable", f"/config:{win_cfg}"]
     print(f"Launch: {' '.join(cmd)}")
-    print(f"Working dir (report lands here, pitfall #1): {instance}")
+    print(f"Working dir (report lands here, pitfall #1): {run_dir}")
     if args.dry_run:
         print("Dry run — stopping before launch.")
         return 0
@@ -1194,19 +1169,23 @@ def cmd_tester(args: argparse.Namespace) -> int:
     # --- launch detached (pitfall #6) -------------------------------------
     # Snapshot BEFORE launch so fast runs cannot hide their first journal lines.
     t_launch = time.time()
-    base_jp = _newest_journal(instance, t_launch - 86400)
-    base_jp_name = base_jp.name if base_jp else None
-    base_offset = base_jp.stat().st_size if base_jp else 0
-    # Optimization completion is in tester/logs, not terminal logs.
-    tester_log_dirs = [instance / "tester" / "logs", instance / "Tester" / "logs"]
-    tester_offsets = {
-        p: p.stat().st_size
-        for d in tester_log_dirs for p in d.glob("*.log")
-    }
+    # Baseline is per journal FILE: logs/YYYYMMDD.log is cumulative for the
+    # day, so only bytes appended after the snapshot count as evidence.
+    journal_offsets = {p.name: p.stat().st_size for p in _journal_files(run_dir)}
+    # Optimization completion is in tester/logs, not the terminal journal.
+    tester_log_dirs = [run_dir / "tester" / "logs", run_dir / "Tester" / "logs"]
+
+    def _tester_journals() -> list[Path]:
+        return sorted(
+            p for d in tester_log_dirs for p in d.glob("*.log")
+            if _JOURNAL_RE.fullmatch(p.name)
+        )
+
+    tester_offsets = {p: p.stat().st_size for p in _tester_journals()}
     try:
         proc = subprocess.Popen(
             cmd,
-            cwd=str(instance),
+            cwd=str(run_dir),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1232,9 +1211,9 @@ def cmd_tester(args: argparse.Namespace) -> int:
                 status = "exited"
                 break
             time.sleep(2)
-            jp = _newest_journal(instance, t_launch)
+            jp = _newest_journal(run_dir, t_launch)
             if jp is not None:
-                jtext = _read_journal_since(jp, base_offset if jp.name == base_jp_name else 0)
+                jtext = _read_journal_since(jp, journal_offsets.get(jp.name, 0))
                 if "cannot load config" in jtext and "config-load-error" not in seen_events:
                     seen_events.add("config-load-error")
                     print("FAIL: journal reports 'cannot load config' — aborting (pitfall #2)")
@@ -1257,23 +1236,23 @@ def cmd_tester(args: argparse.Namespace) -> int:
     # --- post-mortem: journal + report ------------------------------------
     time.sleep(1.5)
     if journal_path is None:
-        journal_path = _newest_journal(instance, t_launch)
+        journal_path = _newest_journal(run_dir, t_launch)
     key_lines: list[str] = []
     if journal_path is not None:
         jtext = _read_journal_since(
-            journal_path, base_offset if journal_path.name == base_jp_name else 0
+            journal_path, journal_offsets.get(journal_path.name, 0)
         )
         key_lines = _journal_key_lines(jtext)
         print(f"\nJournal: {journal_path}")
         for ln in key_lines:
             print(f"  {ln}")
     else:
-        print(f"\nWarn: no journal found under {instance / 'logs'}")
+        print(f"\nWarn: no journal found under {run_dir / 'logs'}")
 
     tester_journals: list[str] = []
     optimization_lines: list[str] = []
     if optimization:
-        for jp in sorted({p for d in tester_log_dirs for p in d.glob("*.log")}):
+        for jp in _tester_journals():
             new_text = _read_journal_since(jp, tester_offsets.get(jp, 0))
             if not new_text:
                 continue
@@ -1293,7 +1272,7 @@ def cmd_tester(args: argparse.Namespace) -> int:
     else:
         passed = any('last test passed with result "successfully finished"' in ln
                      for ln in key_lines)
-    report = _locate_report(instance, report_name, t_launch, optimization=optimization)
+    report = _locate_report(run_dir, report_name, t_launch, optimization=optimization)
 
     outdir = (
         Path(args.out).resolve() if args.out
@@ -1304,7 +1283,7 @@ def cmd_tester(args: argparse.Namespace) -> int:
         outdir.mkdir(parents=True, exist_ok=True)
         to_copy = [report] + [
             p for suf in _REPORT_PNG_SUFFIXES
-            for p in [instance / f"{report.stem}{suf}"] if not optimization and p.is_file()
+            for p in [run_dir / f"{report.stem}{suf}"] if not optimization and p.is_file()
         ]
         for p in to_copy:
             dest = outdir / p.name
@@ -1313,7 +1292,7 @@ def cmd_tester(args: argparse.Namespace) -> int:
         print(f"\nReport: {report.name} → {outdir}")
     elif status == "exited":
         print(
-            f"\nError: no report found in {instance} newer than launch "
+            f"\nError: no report found in {run_dir} newer than launch "
             f"(pitfall #1 — Report= lands in the terminal working dir)"
         )
 
@@ -1323,7 +1302,7 @@ def cmd_tester(args: argparse.Namespace) -> int:
             "passed": passed,
             "ea": expert_rel,
             "optimization": optimization_mode,
-            "instance": str(instance),
+            "run_dir": str(run_dir),
             "staged_ini": str(staged),
             "journal": str(journal_path) if journal_path else None,
             "journal_key_lines": key_lines,
@@ -1575,12 +1554,15 @@ def cmd_init_ini(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    global MT5_BASE, MQL5_DIR
     parser = argparse.ArgumentParser(
-        description="MQL5 development helper (compile, check, deploy)"
+        description="MQL5 development helper: compile, check, deploy, "
+                    "init-ini, tester (paths/executables from .env or env)"
     )
-    # Global option — must be parsed before subcommand so we can apply .env
-    # before resolving MT5_BASE / MQL5_DIR.  When omitted, the script walks
-    # up from cwd looking for the project-root ``.env`` (the default).
+    # Global option — must be parsed before the subcommand so .env is
+    # applied before resolving MT5_BASE / MQL5_DIR.  When omitted, the
+    # script walks up from cwd, then from its own directory, for the
+    # project-root ``.env`` (the default).
     parser.add_argument(
         "--env-file",
         type=Path,
@@ -1633,12 +1615,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Headless single test or Grid optimization via INI: terminal64.exe /portable /config:<INI>",
     )
     bt.add_argument("ini", help="Tester config .ini (format: references/quick-ref-tester-automation.md)")
-    bt.add_argument("--instance", metavar="DIR",
-                    help="REQUIRED. Dedicated runner dir (cloned from MT5_BASE on "
-                         "first use). Must not be the MT5_BASE install itself nor a "
-                         "directory an interactive terminal uses; no default is guessed")
-    bt.add_argument("--no-refresh", action="store_true",
-                    help="Skip copying the EA .ex5 from host MQL5 into the instance")
     bt.add_argument("--stage-dir", metavar="DIR",
                     help="Dir to stage the normalized INI (default: Wine drive root derived "
                          "from MT5_BASE, e.g. drive_c → C:\\). Must yield a SPACE-FREE "
@@ -1648,7 +1624,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "(default: ./tester-report-<EA>-<ts>)")
     bt.add_argument("--report-name", help="Override [Tester] Report= base name")
     bt.add_argument("--timeout", type=int, default=3600, help="Seconds (default 3600)")
-    bt.add_argument("--wine", default="wine", help="Wine binary (Unix only)")
     bt.add_argument("--dry-run", action="store_true",
                     help="Validate, stage, prepare, print launch command; do NOT launch")
     bt.add_argument("--json", action="store_true", help="Emit result as JSON")
@@ -1657,9 +1632,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Resolve paths (.env first, then env vars) before any command runs
+    # Resolve paths (.env first, then env vars) before ANY command runs, so
+    # every subcommand reads the same configuration.  --no-env skips the
+    # file and uses the exported variables only.
     if args.no_env:
-        global MT5_BASE, MQL5_DIR
         MT5_BASE, MQL5_DIR = _resolve_paths()
     else:
         _apply_paths(args.env_file)

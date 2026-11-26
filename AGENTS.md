@@ -480,17 +480,16 @@ it ran before, else to the compiled source default (history-dependent).
 defaults are kept verbatim with a `; TODO:` comment.
 
 **tester** runs a headless single Strategy Tester test **or Grid/genetic optimization**
-via `terminal64.exe /portable /config:<INI>`: validates the INI (required
-`[Tester]` keys, `UseLocal=1`, `[TesterInputs]` line format (5-segment
-optimizer form or bare `name=value`), `Expert=`
+via `MT5_BASE/terminal64.exe /portable /config:<INI>`: validates the INI
+(required `[Tester]` keys, `UseLocal=1`, `[TesterInputs]` line format
+(5-segment optimizer form or bare `name=value`), `Expert=`
 resolves to an existing `.ex5`), stages a normalized CRLF copy at a
 SPACE-FREE Windows path (`--stage-dir`, default: Wine drive root
-derived from `MT5_BASE`), refreshes the `.ex5` into the runner
-instance (`--instance DIR` is **required** — never guessed — and is
-cloned from `MT5_BASE` on first use so the user's GUI terminal is
-untouched; a path overlapping `MT5_BASE` is rejected), launches
-detached, polls process
-exit + UTF-16LE journal (only content appended after launch) + report
+derived from `MT5_BASE`), launches detached **in place** — nothing is
+copied or cloned, the install named by `MT5_BASE` is the runner, so no
+GUI terminal may be running on it — polls process
+exit + UTF-16LE journal (only `logs/YYYYMMDD.log` bytes appended after
+launch) + report
 file, copies the report artifacts to `-o OUTDIR`, and prints the
 summary. Optimization mode is controlled by `Optimization=` in the INI
 (0=single, 1=Grid, 2=genetic, 3=Market Watch); output format differs:
@@ -501,11 +500,18 @@ Pitfall list with observed error strings:
 
 Paths are **never auto-detected**. `MT5_BASE`, `MQL5_DIR`, and
 `WINE_DISK_ROOT` are resolved **`.env` first, then environment
-variables**: the project-root `.env` (walk-up from cwd; `--env-file
-PATH` names one explicitly, `--no-env` skips file loading) overrides an
-already-exported `$MT5_BASE` / `$MQL5_DIR` / `$WINE_DISK_ROOT`; the
-variables are only the fallback for keys the file omits. A key missing
-from both is a hard error naming the variable — no guessed path.
+variables**: the project-root `.env` (walk-up from cwd, then from the
+script directory; `--env-file PATH` names one explicitly, `--no-env`
+skips file loading) overrides an already-exported `$MT5_BASE` /
+`$MQL5_DIR` / `$WINE_DISK_ROOT`; the variables are only the fallback
+for keys the file omits. A key missing from both is a hard error naming
+the variable — no guessed path.
+The MT5 programs come from that configuration only:
+`MT5_BASE/MetaEditor64.exe` for compile/check/deploy and
+`MT5_BASE/terminal64.exe` for `tester` — no directory scanning. A
+missing `MT5_BASE` directory, or a missing program inside it, is a
+hard error (exit 1) naming what is missing, never a silent fallback.
+Wine itself is just the `wine` binary on PATH (no extra config).
 `WINE_DISK_ROOT` (e.g. `Z`) is the drive
 letter that maps to `/` under Wine on Unix (Linux/macOS); ignored on
 Windows. Wine paths are written `Z://home/USER/...` (drive letter +

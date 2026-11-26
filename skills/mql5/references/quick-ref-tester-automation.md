@@ -14,11 +14,11 @@ python scripts/mql5_helper.py init-ini Experts/MyEA.mq5 \
 # 2. Review the INI: Optimization=0 for a single test; =1 for Grid.
 # For Grid, also set start/step/stop and Y for the inputs to vary.
 python scripts/mql5_helper.py tester MyEA.XAUUSD.M15.ini \
-    --instance DIR [--stage-dir DIR] [-o OUTDIR] [--timeout 3600]
+    [--stage-dir DIR] [-o OUTDIR] [--timeout 3600]
 ```
 
-`--instance DIR` is **mandatory** — `tester` never guesses a runner
-directory (see pitfall #3).
+`tester` runs the install named by `MT5_BASE` **in place** — no runner
+directory is required, guessed, copied, or cloned (see pitfall #3).
 
 `init-ini` defaults to `Optimization=0`; change that **in the INI** to
 select optimization. `--json` prints parsed inputs instead of writing;
@@ -28,18 +28,27 @@ enum/datetime identifiers unresolved from source are kept verbatim with
 
 ## 0. Path resolution (`.env` first, then env vars)
 
-`mql5_helper.py` never scans `Program Files` or guesses directories. It
-resolves `MT5_BASE`, `MQL5_DIR`, `WINE_DISK_ROOT` in this order:
+`mql5_helper.py` never scans `Program Files` and never guesses
+directories. It resolves `MT5_BASE`, `MQL5_DIR`, `WINE_DISK_ROOT` in
+this order:
 
 1. the project **`.env`** file — walk-up from the CWD to the first
-   `.env` (`--env-file PATH` names one explicitly, `--no-env` disables
-   `.env` loading entirely);
+   `.env`, then walk-up from the script directory (so a command run from
+   an unrelated CWD still reads the project file); `--env-file PATH`
+   names one explicitly, `--no-env` disables `.env` loading entirely;
 2. the real **environment variables** (`$MT5_BASE`, `$MQL5_DIR`,
    `$WINE_DISK_ROOT`) — only as a fallback for keys the file omits.
 
 `.env` therefore **overrides** an already-exported variable; treat the
 project file as the single source of truth. A key missing from both is
 a hard error naming the variable (exit 1), never a guessed path.
+
+The MT5 programs come from that configuration only:
+`MT5_BASE/MetaEditor64.exe` (compile / check / deploy) and
+`MT5_BASE/terminal64.exe` (tester) — no directory scanning. A missing
+`MT5_BASE` directory, or a missing program inside it, is a hard error
+naming what is missing, never a silent fallback. Wine itself is just the
+`wine` binary on PATH (no extra config).
 
 ```sh
 # .env at the project root
@@ -68,18 +77,12 @@ XAUUSD M15 2.4-year real-tick run ≈ 52–59 s.
    The terminal then boots as a plain GUI. `tester` stages an existing,
    normalized INI via `--stage-dir` (default: Wine drive root derived
    from `MT5_BASE`, e.g. `…/drive_c` → `C:\`) and rejects spaces.
-3. **Single-instance lock.** Do not reuse an installation/data directory
-   that already has a running terminal. Pass a dedicated
-   **`--instance DIR`** — there is no default: a guessed path (the old
-   `MetaTrader 5-auto` sibling of `MT5_BASE`) lands on a directory a
-   GUI/auto terminal may own, trips the lock, and fails far from the
-   cause, so the helper now errors instead. The instance is auto-cloned
-   from `MT5_BASE` if absent, including `Bases\` history and `MQL5\`;
-   overlapping the install (`--instance` equal to, inside, or a parent
-   of `MT5_BASE`) is rejected because the clone would recurse into
-   itself. The helper refreshes the EA `.ex5` from host MQL5 on each run
-   unless `--no-refresh` is given. Do not interrupt the user's GUI or
-   another runner just to free its instance.
+3. **Single-instance lock.** The install named by `MT5_BASE` IS the
+   runner: nothing is copied or cloned, so close any GUI terminal on
+   that installation before a headless run. A second terminal on the
+   same data directory trips the lock and the launch fails far from the
+   cause. The EA `.ex5` is used straight from `MQL5_DIR/Experts/`
+   (`Expert=` resolved there by `tester`), so `deploy` before testing.
 4. **`UseLocal=1` is REQUIRED by this helper.** Without it the observed
    run never spawned a local agent. `tester` forces it in the staged
    copy and rejects explicit `UseLocal=0`. For local-only optimization,
@@ -174,13 +177,13 @@ Model=1
 | 2 | Timeout (`--timeout`, default 3600 s); launched terminal killed |
 | 130 | Ctrl-C; launched terminal killed |
 
-`--json` emits `{status, passed, ea, optimization, instance, staged_ini,
+`--json` emits `{status, passed, ea, optimization, run_dir, staged_ini,
 journal, tester_journals, journal_key_lines, report, outdir, artifacts,
 elapsed_s}` instead
 of the parsed text summary (progress messages still precede the JSON).
 `optimization` is the INI mode string. `--no-summary` skips the parser.
-`--dry-run` validates, stages, refreshes `.ex5`, and prints the command
-without launching; a missing instance is reported but not cloned.
+`--dry-run` validates, stages the INI, and prints the command without
+launching.
 Default `-o`: `./tester-report-<EA>-<ts>/`.
 
 Summary dispatch:
@@ -237,13 +240,13 @@ MovingShift=6||6||1||6||N
 
 ```sh
 python scripts/mql5_helper.py tester grid.ini \
-    --instance /path/to/isolated-runner --report-name agent-verify-grid-2pass \
+    --report-name agent-verify-grid-2pass \
     -o /tmp/agent-verify-grid/report --timeout 180
 ```
 
 Verify the optimization completion journal, XML output, exactly two
-result rows, and `MovingPeriod` values `{12, 13}`. Prefer a fresh runner
-without optimization cache so the first check executes rather than
+result rows, and `MovingPeriod` values `{12, 13}`. Prefer clearing
+`<MT5_BASE>/tester/cache` so the first check executes rather than
 merely retrieves cached passes.
 
 ### Verified result — 2026-09-17
@@ -253,6 +256,8 @@ runner, leaving existing GUI/auto instances untouched. After correcting
 optimization-log detection, the final run returned **0** (`Tester OK.`).
 Its previously generated optimization cache was moved aside before the
 rerun so both passes were calculated, not merely loaded from cache.
+(The recipe originally ran in a cloned runner directory; the `tester`
+command no longer clones — it runs the `MT5_BASE` install in place.)
 
 ```text
 22:05:53.200  Tester      complete optimization started

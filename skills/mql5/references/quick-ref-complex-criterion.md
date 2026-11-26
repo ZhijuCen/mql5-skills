@@ -239,9 +239,9 @@ which statistics do **not** enter.
 
 1. Copy `assets/tester/complex-criterion-probe.mq5` into
    `MQL5/Experts/`, compile, deploy.
-2. Run any single test (`mql5_helper.py tester INI --instance DIR`).
+2. Run any single test (`mql5_helper.py tester INI`).
 3. Read `STAT_COMPLEX_CRITERION` from
-   `<instance>/Tester/Agent-*/MQL5/Files/ccprobe.csv` (column `cc`, 10 dp).
+   `<MT5_BASE>/Tester/Agent-*/MQL5/Files/ccprobe.csv` (column `cc`, 10 dp).
    The probe only writes the file — `Print()` is dropped because it is
    suppressed during optimization.
 
