@@ -7,10 +7,19 @@ tester (headless single test or Grid optimization via an INI file).
 Supports Windows 10+ natively (PowerShell) and Linux/Wine.
 
 Paths are NEVER auto-detected.  MT5_BASE / MQL5_DIR / WINE_DISK_ROOT
-must come from the environment or the project-root ``.env`` file
-(walk-up from cwd, e.g. ``$PROJECT_ROOT/.env``).  WINE_DISK_ROOT is
-required on Unix (Linux/macOS) only — the drive letter that maps to
-``/`` under Wine (e.g. ``Z``); it is ignored on Windows.
+are resolved in this order:
+
+1. the project ``.env`` file (walk-up from cwd, e.g.
+   ``$PROJECT_ROOT/.env``; ``--env-file PATH`` overrides the search,
+   ``--no-env`` disables .env loading entirely),
+2. the real environment variables.
+
+In other words ``.env`` WINS over a pre-existing ``$MT5_BASE`` /
+``$MQL5_DIR`` — the project file is the single source of truth.
+WINE_DISK_ROOT is required on Unix (Linux/macOS) only — the drive
+letter that maps to ``/`` under Wine (e.g. ``Z``); it is ignored on
+Windows.  ``tester`` additionally requires an explicit ``--instance``
+runner directory: there is no guessed default.
 
 Usage:
     python skills/mql5/scripts/mql5_helper.py compile FILE.mq5
@@ -96,7 +105,12 @@ def _load_env(env_path: Optional[Path] = None) -> None:
 
     Supports ``KEY="VALUE" KEY2="VALUE2"`` on one line (space-separated),
     one-var-per-line, or mixes thereof, using ``shlex.split`` for quoting.
-    Existing environment variables take precedence via ``setdefault``.
+    ``#`` comment lines (and trailing ``#`` outside quotes) are ignored.
+
+    Resolution order: the ``.env`` file wins.  A key present in the
+    loaded file OVERWRITES the same variable already exported in the
+    process environment; exported values are only used as a fallback
+    for keys the file does not define.
     """
     candidates: list[Path] = []
     if env_path is not None:
@@ -125,14 +139,17 @@ def _load_env(env_path: Optional[Path] = None) -> None:
             sys.exit(1)
         import shlex
 
-        for token in shlex.split(text):
+        # comments=True: a `#` line is a comment, so a commented-out
+        # `# MQL5_DIR=/old/path` can never win over the active line.
+        for token in shlex.split(text, comments=True):
             if "=" not in token:
                 continue
             idx = token.index("=")
             key = token[:idx]
             val = token[idx + 1 :]
             if key in _ENV_KEYS:
-                os.environ.setdefault(key, val)
+                # .env wins over a pre-exported variable (documented order).
+                os.environ[key] = val
 
 
 # ---------------------------------------------------------------------------
@@ -141,12 +158,13 @@ def _load_env(env_path: Optional[Path] = None) -> None:
 
 
 def _resolve_paths() -> tuple[Path, Path]:
-    """Return (MT5_BASE, MQL5_DIR) from env vars or the project ``.env``.
+    """Return (MT5_BASE, MQL5_DIR) resolved by ``_load_env`` + the environment.
 
-    Both values are required — the script no longer scans Program
-    Files or walks the cwd tree for an MQL5 installation.  When a
-    value is missing it exits with an error naming the variable,
-    instead of guessing.
+    Both values are required — the script never scans Program Files or
+    walks the cwd tree for an MQL5 installation.  When a value is
+    missing it exits with an error naming the variable, instead of
+    guessing: a guessed path surfaces much later as a confusing
+    terminal/journal failure.
     """
     missing = [
         k for k in ("MT5_BASE", "MQL5_DIR") if not os.environ.get(k)
@@ -157,8 +175,8 @@ def _resolve_paths() -> tuple[Path, Path]:
             + ", ".join(missing)
         )
         print(
-            "  Define them in the project-root `.env` (or export them in "
-            "the environment), e.g.:"
+            "  Define them in the project-root `.env` (preferred), or "
+            "export them in the environment, e.g.:"
         )
         print('    MT5_BASE="C:/Program Files/MetaTrader 5"')
         print('    MQL5_DIR="C:/Program Files/MetaTrader 5/MQL5"')
@@ -662,7 +680,8 @@ def cmd_list(args: argparse.Namespace) -> int:
 #   2. /config:<path> must be a Windows-style ABSOLUTE path and
 #      SPACE-FREE — a quoted path with spaces makes the terminal log
 #      `cannot load config "..."` and boot as a plain GUI.
-#   3. Single-instance lock: run against a dedicated cloned instance
+#   3. Single-instance lock: run against a dedicated cloned instance.
+#      There is no default instance path — ``--instance`` is required
 #      (needs Bases\ + MQL5\; temp/logs/agent caches excludable).
 #   4. UseLocal=1 is REQUIRED or no local agent spawns and the run
 #      silently never starts.
@@ -1077,10 +1096,37 @@ def cmd_tester(args: argparse.Namespace) -> int:
     report_name = args.report_name or f"{ea_stem}-{ts}"
 
     # --- runner instance (pitfall #3) ------------------------------------
-    instance = (
-        Path(args.instance).resolve() if args.instance
-        else MT5_BASE.parent / "MetaTrader 5-auto"
-    )
+    # No default instance directory: a guessed path (e.g. "MetaTrader
+    # 5-auto" next to MT5_BASE) silently lands on a directory the user's
+    # GUI/auto terminal may already own, trips the single-instance lock,
+    # and reports a confusing journal/launch failure far from the cause.
+    # Fail loudly here instead.
+    if not args.instance:
+        print(
+            "Error: --instance DIR is required (dedicated headless runner "
+            "directory)."
+        )
+        print(
+            "  There is no default: pass a directory next to the install that "
+            "no interactive terminal uses,"
+        )
+        print(
+            "  e.g. --instance \"…/MetaTrader 5-runner\" (cloned from MT5_BASE "
+            "on first use)."
+        )
+        return 1
+    instance = Path(args.instance).resolve()
+    base = MT5_BASE.resolve()
+    if instance == base or base in instance.parents or instance in base.parents:
+        print(
+            f"Error: --instance must be a separate directory, not {instance} "
+            f"(overlaps MT5_BASE {base})."
+        )
+        print(
+            "  Cloning the install into itself recurses, and reusing the "
+            "GUI install trips the single-instance lock."
+        )
+        return 1
     terminal = instance / "terminal64.exe"
     if not IS_WINDOWS:
         if not shutil.which(args.wine):
@@ -1588,8 +1634,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     bt.add_argument("ini", help="Tester config .ini (format: references/quick-ref-tester-automation.md)")
     bt.add_argument("--instance", metavar="DIR",
-                    help="Runner clone dir (default: <MT5_BASE parent>/MetaTrader 5-auto; "
-                         "bootstrapped by cloning MT5_BASE if missing)")
+                    help="REQUIRED. Dedicated runner dir (cloned from MT5_BASE on "
+                         "first use). Must not be the MT5_BASE install itself nor a "
+                         "directory an interactive terminal uses; no default is guessed")
     bt.add_argument("--no-refresh", action="store_true",
                     help="Skip copying the EA .ex5 from host MQL5 into the instance")
     bt.add_argument("--stage-dir", metavar="DIR",
@@ -1610,7 +1657,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Resolve paths (.env loading + auto-detection) before any command runs
+    # Resolve paths (.env first, then env vars) before any command runs
     if args.no_env:
         global MT5_BASE, MQL5_DIR
         MT5_BASE, MQL5_DIR = _resolve_paths()

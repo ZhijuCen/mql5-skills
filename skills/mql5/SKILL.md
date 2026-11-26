@@ -242,8 +242,8 @@ Built-in to MT5. Modes: **Single Test**, **Optimization** (genetic),
 |-------------------------------|:---:|--------------------------------------------------|
 | Syntax check                  | ✅  | `wine MetaEditor64.exe /compile:"path" /log /s`  |
 | Compile `.mq5 → .ex5`         | ✅  | `wine MetaEditor64.exe /compile:"path" /log`     |
-| Single test (backtest)        | ✅  | `mql5_helper.py tester INI` (headless `/config:`) |
-| Optimization (Grid/genetic)   | ✅  | `mql5_helper.py tester INI` (set `Optimization=1/2` in INI) |
+| Single test (backtest)        | ✅  | `mql5_helper.py tester INI --instance DIR` (headless `/config:`) |
+| Optimization (Grid/genetic)   | ✅  | `mql5_helper.py tester INI --instance DIR` (set `Optimization=1/2` in INI) |
 | Parse tester / optimizer      | ✅  | `scripts/parse_tester_report.py` / `parse_optimizer_report.py` |
 
 Wine/MetaEditor **exit 0 ≠ compilation success** — require fresh
@@ -271,7 +271,7 @@ BARE `name=value`. Example: `assets/Anonymous.XAUUSD.M15.ini`.
 
 Code (OnInit/OnTick/OnDeinit, OnTester) → CLI compile + check →
 `mql5_helper.py init-ini FILE.mq5` (INI skeleton listing ALL inputs) →
-review dates/model → `mql5_helper.py tester INI -o OUTDIR`
+review dates/model → `mql5_helper.py tester INI --instance DIR -o OUTDIR`
 (headless single test or optimization; report artifacts copied to OUTDIR) →
 optimization → analyze → out-of-sample validation. Pitfalls + error
 strings: `references/quick-ref-tester-automation.md`.

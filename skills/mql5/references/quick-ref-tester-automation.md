@@ -14,14 +14,39 @@ python scripts/mql5_helper.py init-ini Experts/MyEA.mq5 \
 # 2. Review the INI: Optimization=0 for a single test; =1 for Grid.
 # For Grid, also set start/step/stop and Y for the inputs to vary.
 python scripts/mql5_helper.py tester MyEA.XAUUSD.M15.ini \
-    [--instance DIR] [--stage-dir DIR] [-o OUTDIR] [--timeout 3600]
+    --instance DIR [--stage-dir DIR] [-o OUTDIR] [--timeout 3600]
 ```
+
+`--instance DIR` is **mandatory** — `tester` never guesses a runner
+directory (see pitfall #3).
 
 `init-ini` defaults to `Optimization=0`; change that **in the INI** to
 select optimization. `--json` prints parsed inputs instead of writing;
 enum/datetime identifiers unresolved from source are kept verbatim with
 `; TODO:` comments — replace them with numeric values before running.
 `--expert PATH` overrides `Expert=` (default `<stem>.ex5`).
+
+## 0. Path resolution (`.env` first, then env vars)
+
+`mql5_helper.py` never scans `Program Files` or guesses directories. It
+resolves `MT5_BASE`, `MQL5_DIR`, `WINE_DISK_ROOT` in this order:
+
+1. the project **`.env`** file — walk-up from the CWD to the first
+   `.env` (`--env-file PATH` names one explicitly, `--no-env` disables
+   `.env` loading entirely);
+2. the real **environment variables** (`$MT5_BASE`, `$MQL5_DIR`,
+   `$WINE_DISK_ROOT`) — only as a fallback for keys the file omits.
+
+`.env` therefore **overrides** an already-exported variable; treat the
+project file as the single source of truth. A key missing from both is
+a hard error naming the variable (exit 1), never a guessed path.
+
+```sh
+# .env at the project root
+MT5_BASE="/home/USER/.wine/drive_c/Program Files/MetaTrader 5"
+MQL5_DIR="/home/USER/.wine/drive_c/Program Files/MetaTrader 5/MQL5"
+WINE_DISK_ROOT="Z"   # Unix only: the drive letter mapping to /
+```
 
 ## 1. Pitfall list
 
@@ -39,14 +64,20 @@ XAUUSD M15 2.4-year real-tick run ≈ 52–59 s.
    `-o OUTDIR`; `--report-name` controls the report name.
 2. **`/config:` path must be Windows-style ABSOLUTE and SPACE-FREE.**
    Spaces can fail even when shell-quoted; journal:
-   `cannot load config "C:\...\MetaTrader 5-auto\.agents-s4.ini"" at start`.
+   `cannot load config "C:\...\runner-headless\.agents-s4.ini" at start`.
    The terminal then boots as a plain GUI. `tester` stages an existing,
    normalized INI via `--stage-dir` (default: Wine drive root derived
    from `MT5_BASE`, e.g. `…/drive_c` → `C:\`) and rejects spaces.
 3. **Single-instance lock.** Do not reuse an installation/data directory
-   that already has a running terminal. Use a dedicated `--instance`:
-   auto-cloned from `MT5_BASE` if absent, including `Bases\` history and
-   `MQL5\`. The helper refreshes the EA `.ex5` from host MQL5 on each run
+   that already has a running terminal. Pass a dedicated
+   **`--instance DIR`** — there is no default: a guessed path (the old
+   `MetaTrader 5-auto` sibling of `MT5_BASE`) lands on a directory a
+   GUI/auto terminal may own, trips the lock, and fails far from the
+   cause, so the helper now errors instead. The instance is auto-cloned
+   from `MT5_BASE` if absent, including `Bases\` history and `MQL5\`;
+   overlapping the install (`--instance` equal to, inside, or a parent
+   of `MT5_BASE`) is rejected because the clone would recurse into
+   itself. The helper refreshes the EA `.ex5` from host MQL5 on each run
    unless `--no-refresh` is given. Do not interrupt the user's GUI or
    another runner just to free its instance.
 4. **`UseLocal=1` is REQUIRED by this helper.** Without it the observed

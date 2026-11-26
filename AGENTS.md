@@ -486,8 +486,10 @@ optimizer form or bare `name=value`), `Expert=`
 resolves to an existing `.ex5`), stages a normalized CRLF copy at a
 SPACE-FREE Windows path (`--stage-dir`, default: Wine drive root
 derived from `MT5_BASE`), refreshes the `.ex5` into the runner
-instance (`--instance`, cloned from `MT5_BASE` on first use so the
-user's GUI terminal is untouched), launches detached, polls process
+instance (`--instance DIR` is **required** — never guessed — and is
+cloned from `MT5_BASE` on first use so the user's GUI terminal is
+untouched; a path overlapping `MT5_BASE` is rejected), launches
+detached, polls process
 exit + UTF-16LE journal (only content appended after launch) + report
 file, copies the report artifacts to `-o OUTDIR`, and prints the
 summary. Optimization mode is controlled by `Optimization=` in the INI
@@ -498,8 +500,13 @@ Pitfall list with observed error strings:
 `skills/mql5/references/quick-ref-tester-automation.md`.
 
 Paths are **never auto-detected**. `MT5_BASE`, `MQL5_DIR`, and
-`WINE_DISK_ROOT` must come from the environment or the project-root
-`.env` (walk-up from cwd). `WINE_DISK_ROOT` (e.g. `Z`) is the drive
+`WINE_DISK_ROOT` are resolved **`.env` first, then environment
+variables**: the project-root `.env` (walk-up from cwd; `--env-file
+PATH` names one explicitly, `--no-env` skips file loading) overrides an
+already-exported `$MT5_BASE` / `$MQL5_DIR` / `$WINE_DISK_ROOT`; the
+variables are only the fallback for keys the file omits. A key missing
+from both is a hard error naming the variable — no guessed path.
+`WINE_DISK_ROOT` (e.g. `Z`) is the drive
 letter that maps to `/` under Wine on Unix (Linux/macOS); ignored on
 Windows. Wine paths are written `Z://home/USER/...` (drive letter +
 double forward slash). `compile`/`check` run MetaEditor directly on

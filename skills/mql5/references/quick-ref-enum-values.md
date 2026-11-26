@@ -358,7 +358,7 @@ Before launching a `.ini`/`.set`:
    `DEAL_`, `TRADE_ACTION_` in the numeric fields. Any remaining
    identifier is a `TODO`, not a value.
 6. **Dry run.** `python skills/mql5/scripts/mql5_helper.py tester INI
-   --dry-run` validates required keys and the `.ex5`, but it does
+   --instance DIR --dry-run` validates required keys and the `.ex5`, but it does
    **not** validate enum values — do steps 1–5 manually.
 
 ### Verify a candidate value against the installed build
