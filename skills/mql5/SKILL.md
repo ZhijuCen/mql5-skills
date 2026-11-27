@@ -279,6 +279,8 @@ strings: `references/quick-ref-tester-automation.md`.
 ### Report Analysis — Tester (HTML → JSON via `parse_tester_report.py`)
 
 Apply in order. Skipping the first means metrics can be GIGO.
+Metric formulas, thresholds and the Z-Score / AHPR / GHPR / LR traps:
+`references/quick-ref-performance-metrics.md`.
 
 1. **Data quality** — History Quality ≥ 95% real ticks; modelling =
    Every tick / Every tick based on real ticks. Never trust
@@ -289,17 +291,15 @@ Apply in order. Skipping the first means metrics can be GIGO.
    Check both Balance and Equity DD (Equity captures floating).
 4. **Consecutive losses** — < 5 tolerable; > 8 = catastrophic under
    martingale / grid. Max consec loss $ < 2× deposit; > deposit = capital risk.
-5. **Stop-out detection** — deal `comment` contains `so`. Always a
-   critical bug (margin insufficient, force-closed before SL).
-   Causes: SL too far, lots too large, risk > capacity, margin drain
-   from concurrency. Fix lots / SL / concurrency.
-6. **Time-window stability** — `windows --count N` slices the
-   backtest into N equal windows; flags `▲2σ` (|z|≥2 on ≥1 metric),
-   `■EXT` (|z|≥5), or `-`. **Picking N**: start with `N ≈
-   backtest_days // 30`; if `N<6`, switch to `N ≈ backtest_days // 14`.
-   Always run `N=1` first (cross-check; 4 of 7 exact, 3 documented
-   approximations: Balance DD Rel%, Recovery Factor, Sharpe Ratio).
-   Scoring semantics: `references/quick-ref-optimizer-analysis.md` §9.
+5. **Stop-out detection** — deal `comment` contains `so`; always a
+   critical bug (margin insufficient, force-closed before SL). Causes:
+   SL too far, lots too large, risk > capacity, margin drain. Fix lots/SL.
+6. **Time-window stability** — `windows --count N` slices the backtest
+   into N equal windows; flags `▲2σ` (|z|≥2), `■EXT` (|z|≥5), or `-`.
+   **Picking N**: `N ≈ backtest_days // 30`; if `N<6` use `// 14`.
+   Always run `N=1` first (4 of 7 metrics exact; Balance DD Rel%,
+   Recovery Factor, Sharpe Ratio are approximations).
+   Scoring: `references/quick-ref-optimizer-analysis.md` §9.
 7. **Deal-level debugging** — drill in via the 6-step methodology
    (pair deals → risk check → SL distance → re-entry → volume →
    monthly): `references/quick-ref-tester-deal-debug.md`. Use
@@ -479,11 +479,10 @@ lifecycle, `CTrade` setup (magic, margin mode, filling, slippage),
 hedging vs netting detection, new-bar check + MTF pattern, risk-based
 sizing using `risk-helpers.mqh`, and retcode checking on `PositionOpen`.
 
-Copy to `MQL5/Experts/` (under your terminal tree), `#include
-"risk-helpers.mqh"` with the path adjusted to your project layout
-(see file header), then extend. Indicator/Script skeletons: copy
-`ea-skeleton.mq5`, change `#property` + `OnInit` → `OnCalculate` or
-`OnStart`, drop the `CTrade` setup.
+Copy to `MQL5/Experts/` (path-adjust the `#include` per your layout,
+see file header), then extend. Indicator/Script skeletons: copy
+`ea-skeleton.mq5`, swap `#property` + `OnInit` → `OnCalculate`/`OnStart`,
+drop the `CTrade` setup.
 
 ## 10. References
 
@@ -492,9 +491,10 @@ Copy to `MQL5/Experts/` (under your terminal tree), `#include
   - `assets/mql5.com-artical-22196-MetaQuotes/` — article 22196 source (export + validation EAs). `outputs/` gitignored.
 - **Quick-refs** (`references/`):
   - `quick-ref-mql5-economic-calendar.md` — `MqlCalendarValue` 128-byte layout, `#resource` pitfalls.
-  - `quick-ref-shadow-parameter-optimization.md` — shadow param compression (combo index); `quick-ref-tester-deal-debug.md` — 6-step deal-level methodology.
+  - `quick-ref-tester-deal-debug.md` — 6-step deal-level methodology.
   - `quick-ref-tester-automation.md` — headless `tester` recipe, pitfall list, Model enum; `quick-ref-enum-values.md` — numeric enum values for `*.ini`/`*.set` (timeframe trap, applied price, trade enums).
   - `quick-ref-optimizer-analysis.md` — env-card, dead params, `outliers`, `failures`; `quick-ref-complex-criterion.md` — Complex Criterion formula/accuracy.
+  - `quick-ref-performance-metrics.md` — the nine tester metrics (PF, EP, RF, SR, AHPR, GHPR, LR corr/SE, Z-Score): formulas, thresholds, blog-755078 corrections.
 - **Book / API** (`references/`): `book/` (581-pg learning path; chapters `00-intro/` … `06-advanced/`); `docs/` (4135-pg API; top folders `19-trading/`, `16-series/`, `26-indicators/`, `24-customind/`, `13-event-handlers/`, `34-standardlibrary/`, `01-constants/`); `symbol-spec/specs-XAUUSD.csv`, `specs-USDJPY.csv`.
 - **Scripts** (`scripts/`): `parse_tester_report.py` (`report`/`analyze`/`windows`); `parse_optimizer_report.py` (`report`/`analyze`/`outliers`/`failures`); `complex_criterion.py` (`report`/`xml`/`validate`); `parse_mql_calendar_bin.py` (positional PATH); `verify_sl_tp_formulas.py verify [SYMBOL ...]`; `mql5_helper.py` (`compile`/`check`/`deploy`/`status`/`list`/`init-ini`/`tester`).
 - **External**: [MQL5 Reference](https://www.mql5.com/en/docs), [MQL5 Book](https://www.mql5.com/en/book), [Strategy Tester Guide](https://www.mql5.com/en/terminal/strategytester).
